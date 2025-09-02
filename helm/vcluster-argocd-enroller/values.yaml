@@ -1,0 +1,184 @@
+# Default values for vcluster-argocd-enroller.
+
+# Replica count for the operator deployment
+replicaCount: 1
+
+# Image configuration
+image:
+  repository: ghcr.io/andrewrothstein/vcluster-argocd-enroller
+  pullPolicy: IfNotPresent
+  # Overrides the image tag whose default is the chart appVersion.
+  tag: ""
+
+# Image pull secrets
+imagePullSecrets: []
+
+# Override the name of the chart
+nameOverride: ""
+# Override the fullname of the chart
+fullnameOverride: ""
+
+# ServiceAccount configuration
+serviceAccount:
+  # Specifies whether a service account should be created
+  create: true
+  # Annotations to add to the service account
+  annotations: {}
+  # The name of the service account to use.
+  # If not set and create is true, a name is generated using the fullname template
+  name: ""
+
+# Pod annotations
+podAnnotations: {}
+
+# Pod security context
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+
+# Container security context
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+    - ALL
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 1000
+
+# Resource limits and requests
+resources:
+  limits:
+    cpu: 200m
+    memory: 256Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+# Node selector for pod scheduling
+nodeSelector: {}
+
+# Tolerations for pod scheduling
+tolerations: []
+
+# Affinity rules for pod scheduling
+affinity: {}
+
+# Operator configuration
+operator:
+  # Namespace where vCluster instances are deployed
+  vclusterNamespace: vcluster-system
+  
+  # Namespace where ArgoCD is deployed
+  argoCDNamespace: argocd
+  
+  # Log level (DEBUG, INFO, WARNING, ERROR)
+  logLevel: INFO
+  
+  # Whether to use the embedded operator code or external ConfigMap
+  useEmbeddedCode: true
+  
+  # If useEmbeddedCode is false, specify the ConfigMap name containing the operator code
+  externalCodeConfigMap: ""
+
+# Monitoring configuration
+monitoring:
+  # Enable Prometheus metrics
+  enabled: false
+  
+  # Service monitor configuration for Prometheus Operator
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 10s
+    labels: {}
+    honorLabels: true
+
+# Additional environment variables for the operator
+env: []
+  # - name: EXAMPLE_VAR
+  #   value: "example-value"
+
+# Additional volume mounts for the operator
+volumeMounts: []
+  # - name: extra-config
+  #   mountPath: /etc/extra-config
+  #   readOnly: true
+
+# Additional volumes for the operator
+volumes: []
+  # - name: extra-config
+  #   configMap:
+  #     name: extra-config
+
+# RBAC configuration
+rbac:
+  # Create RBAC resources
+  create: true
+  
+  # Additional rules to add to the ClusterRole
+  additionalRules: []
+    # - apiGroups: [""]
+    #   resources: ["pods"]
+    #   verbs: ["get", "list"]
+
+# Network policy configuration
+networkPolicy:
+  # Enable network policy
+  enabled: false
+  
+  # Ingress rules
+  ingress: []
+  
+  # Egress rules
+  egress: []
+
+# Pod Disruption Budget configuration
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+  # maxUnavailable: 1
+
+# Autoscaling configuration
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 3
+  targetCPUUtilizationPercentage: 80
+  # targetMemoryUtilizationPercentage: 80
+
+# Priority class for the operator pods
+priorityClassName: ""
+
+# Lifecycle hooks
+lifecycle: {}
+  # preStop:
+  #   exec:
+  #     command: ["/bin/sh", "-c", "sleep 15"]
+
+# Liveness probe configuration
+livenessProbe:
+  enabled: true
+  initialDelaySeconds: 30
+  periodSeconds: 30
+  timeoutSeconds: 5
+  failureThreshold: 3
+  successThreshold: 1
+
+# Readiness probe configuration  
+readinessProbe:
+  enabled: true
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+  successThreshold: 1
+
+# Extra labels to add to all resources
+extraLabels: {}
+
+# Extra annotations to add to all resources
+extraAnnotations: {}

@@ -1,0 +1,24 @@
+Thank you for installing {{ .Chart.Name }}.
+
+Your release is named {{ .Release.Name }}.
+
+vCluster ArgoCD Enroller has been deployed to watch for vCluster instances and automatically enroll them in ArgoCD.
+
+Configuration:
+- vCluster namespace: {{ include "vcluster-argocd-enroller.vclusterNamespace" . }}
+- ArgoCD namespace: {{ include "vcluster-argocd-enroller.argoCDNamespace" . }}
+- Log level: {{ .Values.operator.logLevel }}
+
+To check the operator status:
+  kubectl get deployment {{ include "vcluster-argocd-enroller.fullname" . }} -n {{ include "vcluster-argocd-enroller.vclusterNamespace" . }}
+
+To view operator logs:
+  kubectl logs -l app.kubernetes.io/name={{ include "vcluster-argocd-enroller.name" . }},app.kubernetes.io/instance={{ .Release.Name }} -n {{ include "vcluster-argocd-enroller.vclusterNamespace" . }}
+
+The operator will:
+1. Watch for vCluster StatefulSets in the configured namespace
+2. Extract kubeconfig from vCluster secrets
+3. Create corresponding cluster secrets in ArgoCD
+4. Clean up ArgoCD secrets when vClusters are deleted
+
+For more information, visit: https://github.com/andrewrothstein/vcluster-argocd-enroller
