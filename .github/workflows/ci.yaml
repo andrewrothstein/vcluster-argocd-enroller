@@ -74,7 +74,7 @@ jobs:
           uv run pytest tests/ -v --cov=vcluster_argocd_enroller --cov-report=xml --cov-report=term-missing || echo "Tests failed but continuing"
       
       - name: Upload coverage reports
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v5
         if: always()
         continue-on-error: true
         with:
