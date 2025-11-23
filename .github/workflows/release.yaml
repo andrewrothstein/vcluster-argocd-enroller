@@ -101,7 +101,7 @@ jobs:
           helm push "vcluster-argocd-enroller-${CHART_VERSION}.tgz" oci://${{ env.REGISTRY }}/${{ github.repository_owner }}/charts
       
       - name: Create Helm chart artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: helm-chart
           path: vcluster-argocd-enroller-*.tgz
