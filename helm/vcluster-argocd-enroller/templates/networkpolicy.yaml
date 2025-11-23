@@ -1,0 +1,52 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "vcluster-argocd-enroller.fullname" . }}
+  namespace: {{ include "vcluster-argocd-enroller.vclusterNamespace" . }}
+  labels:
+    {{- include "vcluster-argocd-enroller.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "vcluster-argocd-enroller.selectorLabels" . | nindent 6 }}
+  policyTypes:
+  - Ingress
+  - Egress
+  {{- with .Values.networkPolicy.ingress }}
+  ingress:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  egress:
+  # Allow DNS
+  - to:
+    - namespaceSelector: {}
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+  # Allow Kubernetes API
+  - to:
+    - namespaceSelector: {}
+      podSelector:
+        matchLabels:
+          component: kube-apiserver
+    ports:
+    - protocol: TCP
+      port: 443
+  - to:
+    - namespaceSelector: {}
+      podSelector:
+        matchLabels:
+          app: kubernetes
+    ports:
+    - protocol: TCP
+      port: 443
+  {{- with .Values.networkPolicy.egress }}
+    {{- toYaml . | nindent 2 }}
+  {{- end }}
+{{- end }}

@@ -1,0 +1,23 @@
+apiVersion: v2
+name: vcluster-argocd-enroller
+description: A Helm chart for vCluster ArgoCD Enroller - Kubernetes operator that automatically enrolls vCluster instances in ArgoCD
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - vcluster
+  - argocd
+  - operator
+  - kubernetes
+  - automation
+maintainers:
+  - name: Andrew Rothstein
+    email: andrew.rothstein@gmail.com
+sources:
+  - https://github.com/andrewrothstein/vcluster-argocd-enroller
+home: https://github.com/andrewrothstein/vcluster-argocd-enroller
+icon: https://raw.githubusercontent.com/loft-sh/vcluster/main/docs/static/media/vcluster-logo.svg
+annotations:
+  artifacthub.io/license: MIT
+  artifacthub.io/operator: "true"
+  artifacthub.io/operatorCapabilities: Basic Install

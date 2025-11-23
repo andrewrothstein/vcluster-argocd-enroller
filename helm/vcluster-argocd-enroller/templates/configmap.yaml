@@ -1,0 +1,174 @@
+{{- if and (not .Values.operator.useEmbeddedCode) (not .Values.operator.externalCodeConfigMap) }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "vcluster-argocd-enroller.fullname" . }}-code
+  namespace: {{ include "vcluster-argocd-enroller.vclusterNamespace" . }}
+  labels:
+    {{- include "vcluster-argocd-enroller.labels" . | nindent 4 }}
+data:
+  operator.py: |
+    import base64
+    import json
+    import logging
+    import os
+
+    import kopf
+    import yaml  # type: ignore[import-untyped]
+    from kubernetes import client, config
+    from kubernetes.client.rest import ApiException
+
+    ARGOCD_NAMESPACE = os.getenv("ARGOCD_NAMESPACE", "argocd")
+    VCLUSTER_NAMESPACE = os.getenv("VCLUSTER_NAMESPACE", "vcluster-system")
+
+    logger = logging.getLogger()
+    logger.setLevel(os.getenv("LOG_LEVEL", "INFO"))
+
+    try:
+        if os.getenv("KUBERNETES_SERVICE_HOST"):
+            logger.debug("Running in cluster, using in-cluster config")
+            config.load_incluster_config()
+        else:
+            logger.debug("Running locally, using kubeconfig")
+            config.load_kube_config()
+    except Exception as e:
+        logger.error(f"Failed to load Kubernetes config: {e}")
+        raise
+
+    v1 = client.CoreV1Api()
+    apps_v1 = client.AppsV1Api()
+
+
+    def get_vcluster_secret_name(statefulset_name: str) -> str:
+        """
+        Determine the vCluster secret name based on the StatefulSet name.
+        
+        vCluster naming convention:
+        - If StatefulSet starts with 'vcluster-', the secret is 'vc-{name}'
+        - Otherwise, the secret is 'vc-{statefulset_name}'
+        """
+        if statefulset_name.startswith("vcluster-"):
+            # Remove the 'vcluster-' prefix for the secret name
+            name_without_prefix = statefulset_name[9:]  # len("vcluster-") = 9
+            return f"vc-{name_without_prefix}"
+        else:
+            return f"vc-{statefulset_name}"
+
+
+    @kopf.on.create("apps", "v1", "statefulsets")
+    @kopf.on.update("apps", "v1", "statefulsets")
+    def vcluster_created(name, namespace, meta, spec, **kwargs):
+        """Handle vCluster StatefulSet creation/update events."""
+        
+        # Check if this is a vCluster StatefulSet
+        # vCluster StatefulSets typically have specific labels or container names
+        labels = meta.get("labels", {})
+        
+        # Common vCluster labels
+        if not (labels.get("app") == "vcluster" or 
+                labels.get("app.kubernetes.io/name") == "vcluster" or
+                "vcluster" in name.lower()):
+            logger.debug(f"Skipping non-vCluster StatefulSet: {name}")
+            return
+        
+        logger.info(f"Processing vCluster StatefulSet: {name} in namespace: {namespace}")
+        
+        # Get the vCluster kubeconfig secret
+        secret_name = get_vcluster_secret_name(name)
+        
+        try:
+            secret = v1.read_namespaced_secret(name=secret_name, namespace=namespace)
+        except ApiException as e:
+            if e.status == 404:
+                logger.warning(f"vCluster secret {secret_name} not found in namespace {namespace}. It may not be ready yet.")
+                raise kopf.TemporaryError("vCluster secret not ready", delay=30)
+            else:
+                logger.error(f"Error reading secret {secret_name}: {e}")
+                raise
+        
+        # Extract kubeconfig from secret
+        kubeconfig_data = secret.data.get("config.yaml") or secret.data.get("kubeconfig.yaml")
+        if not kubeconfig_data:
+            logger.error(f"No kubeconfig found in secret {secret_name}")
+            raise kopf.PermanentError(f"No kubeconfig found in secret {secret_name}")
+        
+        # Decode and parse kubeconfig
+        kubeconfig_yaml = base64.b64decode(kubeconfig_data).decode("utf-8")
+        kubeconfig = yaml.safe_load(kubeconfig_yaml)
+        
+        # Extract cluster information
+        cluster = kubeconfig["clusters"][0]["cluster"]
+        server = cluster["server"]
+        ca_data = cluster.get("certificate-authority-data", "")
+        
+        # Create ArgoCD cluster secret
+        argocd_secret = client.V1Secret(
+            metadata=client.V1ObjectMeta(
+                name=f"vcluster-{name}",
+                namespace=ARGOCD_NAMESPACE,
+                labels={
+                    "argocd.argoproj.io/secret-type": "cluster",
+                    "vcluster-operator": "true",
+                    "vcluster-name": name,
+                    "vcluster-namespace": namespace
+                }
+            ),
+            type="Opaque",
+            data={
+                "name": base64.b64encode(f"vcluster-{name}".encode()).decode(),
+                "server": base64.b64encode(server.encode()).decode(),
+                "config": base64.b64encode(json.dumps({
+                    "tlsClientConfig": {
+                        "insecure": False,
+                        "caData": ca_data
+                    }
+                }).encode()).decode()
+            }
+        )
+        
+        # Create or update the ArgoCD secret
+        try:
+            existing = v1.read_namespaced_secret(name=f"vcluster-{name}", namespace=ARGOCD_NAMESPACE)
+            # Update existing secret
+            existing.data = argocd_secret.data
+            v1.replace_namespaced_secret(name=f"vcluster-{name}", namespace=ARGOCD_NAMESPACE, body=existing)
+            logger.info(f"Updated ArgoCD cluster secret for vCluster {name}")
+        except ApiException as e:
+            if e.status == 404:
+                # Create new secret
+                v1.create_namespaced_secret(namespace=ARGOCD_NAMESPACE, body=argocd_secret)
+                logger.info(f"Created ArgoCD cluster secret for vCluster {name}")
+            else:
+                logger.error(f"Error managing ArgoCD secret: {e}")
+                raise
+        
+        return {"status": "Success"}
+
+
+    @kopf.on.delete("apps", "v1", "statefulsets")
+    def vcluster_deleted(name, namespace, **kwargs):
+        """Handle vCluster StatefulSet deletion events."""
+        
+        logger.info(f"vCluster StatefulSet {name} deleted from namespace {namespace}")
+        
+        # Delete the corresponding ArgoCD secret
+        try:
+            v1.delete_namespaced_secret(name=f"vcluster-{name}", namespace=ARGOCD_NAMESPACE)
+            logger.info(f"Deleted ArgoCD cluster secret for vCluster {name}")
+        except ApiException as e:
+            if e.status == 404:
+                logger.warning(f"ArgoCD secret for vCluster {name} not found")
+            else:
+                logger.error(f"Error deleting ArgoCD secret: {e}")
+                raise
+        
+        return {"status": "Success"}
+
+
+    @kopf.on.startup()
+    def configure(settings: kopf.OperatorSettings, **_):
+        """Configure operator settings."""
+        settings.posting.enabled = False
+        settings.watching.connect_timeout = 1 * 60
+        settings.watching.server_timeout = 10 * 60
+{{- end }}

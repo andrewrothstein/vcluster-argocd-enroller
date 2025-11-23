@@ -67,3 +67,36 @@ tasks:
       - find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
       - rm -rf .pytest_cache .coverage htmlcov
       - rm -f test-enrollment.sh
+
+  helm-lint:
+    desc: "Lint Helm chart"
+    cmds:
+      - helm lint helm/vcluster-argocd-enroller
+
+  helm-package:
+    desc: "Package Helm chart"
+    cmds:
+      - helm package helm/vcluster-argocd-enroller -d dist/
+
+  helm-install:
+    desc: "Install Helm chart"
+    vars:
+      NAMESPACE: '{{ .NAMESPACE | default "vcluster-system" }}'
+      RELEASE: '{{ .RELEASE | default "vcluster-argocd-enroller" }}'
+    cmds:
+      - helm upgrade --install {{ .RELEASE }} ./helm/vcluster-argocd-enroller --namespace {{ .NAMESPACE }} --create-namespace
+
+  helm-uninstall:
+    desc: "Uninstall Helm chart"
+    vars:
+      NAMESPACE: '{{ .NAMESPACE | default "vcluster-system" }}'
+      RELEASE: '{{ .RELEASE | default "vcluster-argocd-enroller" }}'
+    cmds:
+      - helm uninstall {{ .RELEASE }} --namespace {{ .NAMESPACE }}
+
+  helm-template:
+    desc: "Render Helm chart templates"
+    vars:
+      NAMESPACE: '{{ .NAMESPACE | default "vcluster-system" }}'
+    cmds:
+      - helm template vcluster-argocd-enroller ./helm/vcluster-argocd-enroller --namespace {{ .NAMESPACE }}
