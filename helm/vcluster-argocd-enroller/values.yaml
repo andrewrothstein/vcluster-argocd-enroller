@@ -71,24 +71,18 @@ affinity: {}
 operator:
   # Namespace where vCluster instances are deployed
   vclusterNamespace: vcluster-system
-  
+
   # Namespace where ArgoCD is deployed
   argoCDNamespace: argocd
-  
+
   # Log level (DEBUG, INFO, WARNING, ERROR)
   logLevel: INFO
-  
-  # Whether to use the embedded operator code or external ConfigMap
-  useEmbeddedCode: true
-  
-  # If useEmbeddedCode is false, specify the ConfigMap name containing the operator code
-  externalCodeConfigMap: ""
 
 # Monitoring configuration
 monitoring:
   # Enable Prometheus metrics
   enabled: false
-  
+
   # Service monitor configuration for Prometheus Operator
   serviceMonitor:
     enabled: false
@@ -118,7 +112,7 @@ volumes: []
 rbac:
   # Create RBAC resources
   create: true
-  
+
   # Additional rules to add to the ClusterRole
   additionalRules: []
     # - apiGroups: [""]
@@ -129,10 +123,10 @@ rbac:
 networkPolicy:
   # Enable network policy
   enabled: false
-  
+
   # Ingress rules
   ingress: []
-  
+
   # Egress rules
   egress: []
 
@@ -168,7 +162,7 @@ livenessProbe:
   failureThreshold: 3
   successThreshold: 1
 
-# Readiness probe configuration  
+# Readiness probe configuration
 readinessProbe:
   enabled: true
   initialDelaySeconds: 10

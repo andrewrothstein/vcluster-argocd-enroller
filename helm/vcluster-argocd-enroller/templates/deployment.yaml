@@ -18,11 +18,10 @@ spec:
       {{- include "vcluster-argocd-enroller.selectorLabels" . | nindent 6 }}
   template:
     metadata:
+      {{- with .Values.podAnnotations }}
       annotations:
-        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
-        {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
-        {{- end }}
+      {{- end }}
       labels:
         {{- include "vcluster-argocd-enroller.selectorLabels" . | nindent 8 }}
     spec:
@@ -46,20 +45,8 @@ spec:
         {{- end }}
         image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
         imagePullPolicy: {{ .Values.image.pullPolicy }}
-        {{- if .Values.operator.useEmbeddedCode }}
         command:
-        - python
-        - -m
-        - vcluster_argocd_enroller.operator
-        {{- else }}
-        command:
-        - python
-        - /app/operator.py
-        volumeMounts:
-        - name: operator-code
-          mountPath: /app
-          readOnly: true
-        {{- end }}
+        - vcluster-argocd-enroller
         env:
         - name: VCLUSTER_NAMESPACE
           value: {{ include "vcluster-argocd-enroller.vclusterNamespace" . | quote }}
@@ -67,10 +54,6 @@ spec:
           value: {{ include "vcluster-argocd-enroller.argoCDNamespace" . | quote }}
         - name: LOG_LEVEL
           value: {{ .Values.operator.logLevel | quote }}
-        - name: KUBERNETES_SERVICE_HOST
-          value: "kubernetes.default.svc"
-        - name: KUBERNETES_SERVICE_PORT
-          value: "443"
         {{- with .Values.env }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -96,7 +79,7 @@ spec:
         {{- if .Values.readinessProbe.enabled }}
         readinessProbe:
           httpGet:
-            path: /readyz
+            path: /healthz
             port: 8080
           initialDelaySeconds: {{ .Values.readinessProbe.initialDelaySeconds }}
           periodSeconds: {{ .Values.readinessProbe.periodSeconds }}
@@ -108,13 +91,8 @@ spec:
         lifecycle:
           {{- toYaml . | nindent 12 }}
         {{- end }}
-      {{- if not .Values.operator.useEmbeddedCode }}
-      volumes:
-      - name: operator-code
-        configMap:
-          name: {{ .Values.operator.externalCodeConfigMap | default (printf "%s-code" (include "vcluster-argocd-enroller.fullname" .)) }}
-      {{- end }}
       {{- with .Values.volumes }}
+      volumes:
       {{- toYaml . | nindent 6 }}
       {{- end }}
       {{- with .Values.nodeSelector }}
