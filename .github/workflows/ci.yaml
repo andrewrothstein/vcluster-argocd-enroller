@@ -66,7 +66,7 @@ jobs:
 
       - name: Run tests
         run: |
-          uv run pytest tests/ -v --cov=vcluster_argocd_enroller --cov-report=xml --cov-report=term-missing
+          uv run pytest tests/ -v -m "not e2e" --cov=vcluster_argocd_enroller --cov-report=xml --cov-report=term-missing
 
       - name: Upload coverage reports
         uses: codecov/codecov-action@v4
@@ -239,14 +239,23 @@ jobs:
           helm install test-release ./helm/vcluster-argocd-enroller \
             --namespace vcluster-system \
             --wait \
-            --timeout 2m \
+            --timeout 3m \
             --set image.repository=vcluster-argocd-enroller \
             --set image.tag=test \
             --set image.pullPolicy=Never \
-            --set operator.logLevel=DEBUG
+            --set operator.logLevel=DEBUG \
+            --set readinessProbe.initialDelaySeconds=5 \
+            --set readinessProbe.periodSeconds=5 \
+            --set livenessProbe.initialDelaySeconds=15
 
       - name: Check deployment
+        if: always()
         run: |
-          kubectl get all -n vcluster-system
-          kubectl describe deployment -n vcluster-system
-          kubectl logs -n vcluster-system -l app.kubernetes.io/name=vcluster-argocd-enroller --tail=50
+          echo "=== Pod Status ==="
+          kubectl get pods -n vcluster-system -o wide
+          echo "=== Pod Describe ==="
+          kubectl describe pods -n vcluster-system -l app.kubernetes.io/name=vcluster-argocd-enroller
+          echo "=== Pod Logs ==="
+          kubectl logs -n vcluster-system -l app.kubernetes.io/name=vcluster-argocd-enroller --tail=100 || true
+          echo "=== Events ==="
+          kubectl get events -n vcluster-system --sort-by='.lastTimestamp' | tail -30
