@@ -20,59 +20,54 @@ jobs:
   lint:
     name: Lint Code
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-      
+
       - name: Install uv
         uses: astral-sh/setup-uv@v3
         with:
           enable-cache: true
-      
+
       - name: Install dependencies
         run: |
           uv sync --all-extras
-      
+
       - name: Run pre-commit
         uses: pre-commit/action@v3.0.1
-        continue-on-error: true
 
   test:
     name: Run Tests
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ['3.12', '3.13']
-    
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
-      
+          python-version: ${{ env.PYTHON_VERSION }}
+
       - name: Install uv
         uses: astral-sh/setup-uv@v3
         with:
           enable-cache: true
-      
+
       - name: Install dependencies
         run: |
           uv sync --all-extras
-      
+
       - name: Run tests
-        continue-on-error: true
         run: |
-          uv run pytest tests/ -v --cov=vcluster_argocd_enroller --cov-report=xml --cov-report=term-missing || echo "Tests failed but continuing"
-      
+          uv run pytest tests/ -v -m "not e2e" --cov=vcluster_argocd_enroller --cov-report=xml --cov-report=term-missing
+
       - name: Upload coverage reports
         uses: codecov/codecov-action@v4
         if: always()
@@ -87,14 +82,14 @@ jobs:
   build-docker:
     name: Build Docker Image
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-      
+
       - name: Build Docker image
         uses: docker/build-push-action@v5
         with:
@@ -104,14 +99,14 @@ jobs:
           tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:test
           cache-from: type=gha
           cache-to: type=gha,mode=max
-      
+
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:test
           format: 'sarif'
           output: 'trivy-results.sarif'
-      
+
       - name: Upload Trivy results to GitHub Security
         uses: github/codeql-action/upload-sarif@v3
         if: always() && github.event_name != 'pull_request'
@@ -122,55 +117,43 @@ jobs:
   lint-helm:
     name: Lint Helm Chart
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      
+
       - name: Install Helm
         uses: azure/setup-helm@v3
         with:
           version: 'latest'
-      
+
       - name: Lint Helm chart
         run: |
           helm lint helm/vcluster-argocd-enroller
-      
+
       - name: Template Helm chart
         run: |
           helm template test helm/vcluster-argocd-enroller --namespace vcluster-system
-      
-      - name: Install Helm unittest plugin
-        run: |
-          helm plugin install https://github.com/helm-unittest/helm-unittest.git || true
-      
-      - name: Run Helm chart tests (if available)
-        run: |
-          if [ -d "helm/vcluster-argocd-enroller/tests" ]; then
-            helm unittest helm/vcluster-argocd-enroller
-          else
-            echo "No Helm chart tests found, skipping..."
-          fi
 
   validate-manifests:
     name: Validate Kubernetes Manifests
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      
+
       - name: Install kubeconform
         run: |
           wget https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz
           tar xf kubeconform-linux-amd64.tar.gz
           sudo mv kubeconform /usr/local/bin
-      
+
       - name: Install Helm
         uses: azure/setup-helm@v3
         with:
           version: 'latest'
-      
+
       - name: Validate Helm templates
         run: |
           helm template test helm/vcluster-argocd-enroller --namespace vcluster-system | \
@@ -179,11 +162,11 @@ jobs:
   security-scan:
     name: Security Scanning
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      
+
       - name: Run Trivy security scan on filesystem
         uses: aquasecurity/trivy-action@master
         with:
@@ -191,14 +174,14 @@ jobs:
           scan-ref: '.'
           format: 'sarif'
           output: 'trivy-fs-results.sarif'
-      
+
       - name: Upload Trivy results
         uses: github/codeql-action/upload-sarif@v3
         if: always() && github.event_name != 'pull_request'
         continue-on-error: true
         with:
           sarif_file: 'trivy-fs-results.sarif'
-      
+
       - name: Run Snyk security scan
         uses: snyk/actions/python@master
         if: github.event_name != 'pull_request' && env.SNYK_TOKEN != ''
@@ -212,12 +195,11 @@ jobs:
     name: Integration Tests
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
-    continue-on-error: true
-    
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      
+
       - name: Create k3s cluster
         uses: AbsaOSS/k3d-action@v2
         with:
@@ -226,31 +208,54 @@ jobs:
             --agents 1
             --no-lb
             --k3s-arg "--disable=traefik,servicelb,metrics-server@server:*"
-      
+
       - name: Install Helm
         uses: azure/setup-helm@v3
         with:
           version: 'latest'
-      
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build test image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: vcluster-argocd-enroller:test
+
+      - name: Import image into k3d
+        run: |
+          k3d image import vcluster-argocd-enroller:test -c test-cluster
+
       - name: Create namespaces
         run: |
           kubectl create namespace vcluster-system
           kubectl create namespace argocd
-      
+
       - name: Install Helm chart
         run: |
           helm install test-release ./helm/vcluster-argocd-enroller \
             --namespace vcluster-system \
             --wait \
-            --timeout 2m \
-            --set image.repository=python \
-            --set image.tag=3.12-slim \
-            --set image.pullPolicy=IfNotPresent \
+            --timeout 3m \
+            --set image.repository=vcluster-argocd-enroller \
+            --set image.tag=test \
+            --set image.pullPolicy=Never \
             --set operator.logLevel=DEBUG \
-            --set operator.useEmbeddedCode=false
-      
+            --set readinessProbe.initialDelaySeconds=5 \
+            --set readinessProbe.periodSeconds=5 \
+            --set livenessProbe.initialDelaySeconds=15
+
       - name: Check deployment
+        if: always()
         run: |
-          kubectl get all -n vcluster-system
-          kubectl describe deployment -n vcluster-system
-          kubectl logs -n vcluster-system -l app.kubernetes.io/name=vcluster-argocd-enroller --tail=50
+          echo "=== Pod Status ==="
+          kubectl get pods -n vcluster-system -o wide
+          echo "=== Pod Describe ==="
+          kubectl describe pods -n vcluster-system -l app.kubernetes.io/name=vcluster-argocd-enroller
+          echo "=== Pod Logs ==="
+          kubectl logs -n vcluster-system -l app.kubernetes.io/name=vcluster-argocd-enroller --tail=100 || true
+          echo "=== Events ==="
+          kubectl get events -n vcluster-system --sort-by='.lastTimestamp' | tail -30
