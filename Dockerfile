@@ -23,6 +23,9 @@ WORKDIR /app
 # Copy the wheel from builder
 COPY --from=builder /dist/*.whl /tmp/
 
+# Create non-root user (kopf/asyncio calls getpwuid which needs a passwd entry)
+RUN useradd --uid 1000 --no-create-home --shell /sbin/nologin appuser
+
 # Install the wheel and its dependencies
 RUN uv venv && \
     uv pip install --no-cache /tmp/*.whl && \
