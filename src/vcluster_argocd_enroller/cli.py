@@ -113,7 +113,7 @@ def run(
     sys.argv = ["kopf", "run", "-m", "vcluster_argocd_enroller.operator"] + kopf_args
 
     if clusterwide:
-        sys.argv.append("--clusterwide")
+        sys.argv.append("--all-namespaces")
 
     console.print("[green]Starting operator...[/green]")
     sys.exit(kopf.cli.main())
