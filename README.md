@@ -41,7 +41,7 @@ Key Helm values:
 | Parameter | Description | Default |
 | --------- | ----------- | ------- |
 | `operator.argoCDNamespace` | ArgoCD namespace | `argocd` |
-| `operator.vclusterNamespace` | Namespace for vCluster instances | `vcluster-system` |
+| `operator.vclusterNamespace` | Namespace where the operator is deployed (vClusters are watched cluster-wide) | `vcluster-system` |
 | `operator.logLevel` | Log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) | `INFO` |
 | `resources.requests.cpu` | CPU request | `100m` |
 | `resources.requests.memory` | Memory request | `128Mi` |
