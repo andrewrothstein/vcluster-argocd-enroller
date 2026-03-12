@@ -56,7 +56,7 @@ The following table lists the configurable parameters and their default values:
 | `resources.limits.memory` | Memory limit | `256Mi` |
 | `resources.requests.cpu` | CPU request | `100m` |
 | `resources.requests.memory` | Memory request | `128Mi` |
-| `operator.vclusterNamespace` | Namespace for vCluster instances | `vcluster-system` |
+| `operator.vclusterNamespace` | Namespace where the operator is deployed (vClusters are watched cluster-wide) | `vcluster-system` |
 | `operator.argoCDNamespace` | ArgoCD namespace | `argocd` |
 | `operator.logLevel` | Log level (DEBUG, INFO, WARNING, ERROR) | `INFO` |
 | `operator.useEmbeddedCode` | Use embedded operator code | `true` |
