@@ -160,3 +160,8 @@ cython_debug/
 *.pem
 *.crt
 secrets/
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
