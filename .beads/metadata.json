@@ -1,6 +1,6 @@
 {
   "database": "dolt",
-  "jsonl_export": "issues.jsonl",
   "backend": "dolt",
-  "dolt_database": "beads_vcluster-argocd-enroller"
+  "dolt_database": "beads_vcluster-argocd-enroller",
+  "project_id": "860c0548-4847-460d-be80-c7d244769558"
 }
