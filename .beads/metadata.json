@@ -1,6 +1,7 @@
 {
   "database": "dolt",
   "backend": "dolt",
-  "dolt_database": "beads_vcluster-argocd-enroller",
-  "project_id": "860c0548-4847-460d-be80-c7d244769558"
+  "dolt_mode": "embedded",
+  "dolt_database": "vcluster_argocd_enroller",
+  "project_id": "540e8b22-b1fc-4f63-b2cf-eaad1c0f93e2"
 }
