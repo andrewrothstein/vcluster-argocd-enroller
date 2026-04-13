@@ -25,7 +25,7 @@ dependencies = [
     "kubernetes>=31.0.0",
     "pyyaml>=6.0",
     "kopf[uvloop]>=1.37.2",
-    "cyclopts>=2.9.0",
+    "cyclopts>=4.10.2",
     "rich>=13.7.0"
 ]
 
