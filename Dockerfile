@@ -1,5 +1,5 @@
 # Build stage - build the wheel using uv
-FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim AS builder
+FROM ghcr.io/astral-sh/uv:python3.13-trixie-slim AS builder
 
 WORKDIR /app
 
@@ -11,7 +11,7 @@ COPY src/ ./src/
 RUN uv build --wheel --out-dir /dist
 
 # Runtime stage - use uv base image
-FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim
+FROM ghcr.io/astral-sh/uv:python3.13-trixie-slim
 
 LABEL org.opencontainers.image.title="vcluster-argocd-enroller"
 LABEL org.opencontainers.image.description="Kubernetes operator that automatically enrolls vCluster instances in ArgoCD"

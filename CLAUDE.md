@@ -53,7 +53,7 @@ Pre-commit runs ruff (lint + format), mypy, and hadolint. Config: `line-length=1
 - The operator uses `kopf.TemporaryError(delay=60)` for retryable failures and `kopf.PermanentError` for non-retryable ones.
 - Deletion handlers never raise PermanentError (to avoid blocking finalizer removal).
 - Helm chart deploys into `operator.vclusterNamespace` (default: `vcluster-system`), not a separate operator namespace.
-- Python >= 3.13 required. Docker base image: `ghcr.io/astral-sh/uv:python3.13-bookworm-slim`.
+- Python >= 3.13 required. Docker base image: `ghcr.io/astral-sh/uv:python3.13-trixie-slim`.
 
 
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:ca08a54f -->
