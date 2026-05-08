@@ -76,6 +76,10 @@ bd close <id>         # Complete work
 - Run `bd prime` for detailed command reference and session close protocol
 - Use `bd remember` for persistent knowledge — do NOT use MEMORY.md files
 
+## Branch Workflow
+
+When starting a new PR branch, always run `git fetch origin` first and create the branch from the up-to-date `origin/main` (or the relevant upstream). Do not branch from a stale local ref.
+
 ## Session Completion
 
 **When ending a work session**, you MUST complete ALL steps below. Work is NOT complete until `git push` succeeds.
