@@ -6,9 +6,11 @@ metadata:
   labels:
     {{- include "vcluster-argocd-enroller.labels" . | nindent 4 }}
 rules:
+# Read vCluster-generated `vc-{name}` secrets cluster-wide. Write access to
+# secrets is granted via a namespaced Role in the ArgoCD namespace, not here.
 - apiGroups: [""]
   resources: ["secrets"]
-  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  verbs: ["get", "list", "watch"]
 - apiGroups: ["apps"]
   resources: ["statefulsets"]
   verbs: ["get", "list", "watch", "patch", "update"]
