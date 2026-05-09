@@ -105,8 +105,11 @@ def handle_vcluster_enrollment(statefulset_name: str, namespace: str, **kwargs):
     try:
         vc_secret = core_v1_api.read_namespaced_secret(name=vcluster_secret_name, namespace=namespace)
     except ApiException as e:
-        logger.error(f"API error reading vcluster secret {namespace}/{vcluster_secret_name}: {e}")
-        raise kopf.TemporaryError(f"Failed to read vcluster secret {namespace}/{vcluster_secret_name}: {e}", delay=60)
+        logger.error(f"API error reading vcluster secret {namespace}/{vcluster_secret_name}: {e.status} {e.reason}")
+        raise kopf.TemporaryError(
+            f"Failed to read vcluster secret {namespace}/{vcluster_secret_name}: {e.status} {e.reason}",
+            delay=60,
+        )
     except Exception as e:
         logger.error(f"Failed to read vcluster secret {namespace}/{vcluster_secret_name}: {e}")
         raise kopf.PermanentError(f"Failed to read vcluster secret: {e}")
@@ -129,8 +132,8 @@ def handle_vcluster_enrollment(statefulset_name: str, namespace: str, **kwargs):
             core_v1_api.replace_namespaced_secret(argocd_secret_name, ARGOCD_NAMESPACE, secret_body)
             logger.info(f"Updated ArgoCD cluster secret {argocd_secret_name} for vcluster {vcluster_name}")
         else:
-            logger.error(f"API error creating ArgoCD secret {argocd_secret_name}: {e}")
-            raise kopf.TemporaryError(f"Failed to create ArgoCD secret: {e}", delay=60)
+            logger.error(f"API error creating ArgoCD secret {argocd_secret_name}: {e.status} {e.reason}")
+            raise kopf.TemporaryError(f"Failed to create ArgoCD secret: {e.status} {e.reason}", delay=60)
 
     return {"status": "Success"}
 
@@ -184,9 +187,9 @@ def vcluster_deleted(name, namespace, **kwargs):
         if e.status == 404:
             logger.info(f"ArgoCD secret {argocd_secret_name} not found, already deleted")
         else:
-            logger.error(f"Failed to delete ArgoCD cluster secret {argocd_secret_name}: {e}")
+            logger.error(f"Failed to delete ArgoCD cluster secret {argocd_secret_name}: {e.status} {e.reason}")
             # Don't raise PermanentError on deletion - allow finalizer removal
-            return {"status": "Failed", "message": str(e)}
+            return {"status": "Failed", "message": f"{e.status} {e.reason}"}
     except Exception as e:
         logger.error(f"Failed to remove vcluster {namespace}/{vcluster_name} from ArgoCD: {e}")
         # Don't raise PermanentError on deletion - allow finalizer removal
