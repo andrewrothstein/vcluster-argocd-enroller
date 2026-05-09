@@ -1,0 +1,17 @@
+{{- if .Values.rbac.create -}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "vcluster-argocd-enroller.fullname" . }}
+  namespace: {{ include "vcluster-argocd-enroller.argoCDNamespace" . }}
+  labels:
+    {{- include "vcluster-argocd-enroller.labels" . | nindent 4 }}
+subjects:
+- kind: ServiceAccount
+  name: {{ include "vcluster-argocd-enroller.serviceAccountName" . }}
+  namespace: {{ include "vcluster-argocd-enroller.vclusterNamespace" . }}
+roleRef:
+  kind: Role
+  name: {{ include "vcluster-argocd-enroller.fullname" . }}
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}
