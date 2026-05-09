@@ -122,7 +122,7 @@ rbac:
 # Network policy configuration
 networkPolicy:
   # Enable network policy
-  enabled: false
+  enabled: true
 
   # Ingress rules
   ingress: []
