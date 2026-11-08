@@ -17,7 +17,11 @@ rules:
 # kopf records handler results in the object's status; without this it retries and stalls delete handling.
 - apiGroups: ["apps"]
   resources: ["statefulsets/status"]
-  verbs: ["patch", "update"]
+  verbs: ["get", "patch", "update"]
+# kopf lists CRDs for resource discovery.
+- apiGroups: ["apiextensions.k8s.io"]
+  resources: ["customresourcedefinitions"]
+  verbs: ["get", "list", "watch"]
 - apiGroups: [""]
   resources: ["events"]
   verbs: ["create", "patch"]

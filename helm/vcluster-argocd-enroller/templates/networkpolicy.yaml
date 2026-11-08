@@ -13,9 +13,13 @@ spec:
   policyTypes:
   - Ingress
   - Egress
-  {{- with .Values.networkPolicy.ingress }}
   ingress:
-    {{- toYaml . | nindent 4 }}
+  # Allow kubelet liveness/readiness probes (and other health checks) on the health port
+  - ports:
+    - protocol: TCP
+      port: {{ .Values.networkPolicy.healthPort }}
+  {{- with .Values.networkPolicy.ingress }}
+    {{- toYaml . | nindent 2 }}
   {{- end }}
   egress:
   # Allow DNS
@@ -29,14 +33,19 @@ spec:
       port: 53
     - protocol: TCP
       port: 53
-  # Allow Kubernetes API. The API server is not a pod (the kubernetes Service resolves to node
-  # addresses, port 443 or 6443 depending on distribution), so it cannot be matched by a pod
-  # selector; allow by port only.
-  - ports:
+  # Allow Kubernetes API. The API server is not a pod on k3s, k3d, RKE2 and most managed clusters,
+  # so it is matched by address and port. additionalPorts covers distributions that NAT the
+  # kubernetes Service ClusterIP to another port (e.g. 6443) before policy evaluation.
+  - to:
+    - ipBlock:
+        cidr: {{ .Values.networkPolicy.apiServer.cidr }}
+    ports:
     - protocol: TCP
-      port: 443
+      port: {{ .Values.networkPolicy.apiServer.port }}
+    {{- range .Values.networkPolicy.apiServer.additionalPorts }}
     - protocol: TCP
-      port: 6443
+      port: {{ . }}
+    {{- end }}
   {{- with .Values.networkPolicy.egress }}
     {{- toYaml . | nindent 2 }}
   {{- end }}

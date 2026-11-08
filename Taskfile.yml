@@ -115,18 +115,21 @@ tasks:
       - >-
         helm install test-release ./helm/vcluster-argocd-enroller --namespace vcluster-system --wait --timeout 3m
         --set image.repository=vcluster-argocd-enroller --set image.tag=test --set image.pullPolicy=Never
-        --set operator.logLevel=DEBUG --set readinessProbe.initialDelaySeconds=5 --set readinessProbe.periodSeconds=5
+        --set networkPolicy.enabled=true --set operator.logLevel=DEBUG --set readinessProbe.initialDelaySeconds=5 --set readinessProbe.periodSeconds=5
         --set livenessProbe.initialDelaySeconds=15
 
   k3d-smoke:
-    desc: "Enroll a fake vCluster in the current kube context and verify ArgoCD secret create/delete"
+    desc: "Verify the operator is Ready under its NetworkPolicy, then enroll a fake vCluster and check ArgoCD secret create/delete"
     cmds:
+      - kubectl -n vcluster-system get networkpolicy test-release-vcluster-argocd-enroller
+      - kubectl -n vcluster-system wait --for=condition=Ready pod -l app.kubernetes.io/name=vcluster-argocd-enroller --timeout=120s
       - defer: kubectl delete -f tests/k3d/fake-vcluster.yaml --ignore-not-found --wait=false
       - kubectl apply -f tests/k3d/fake-vcluster.yaml
       - kubectl -n argocd wait --for=create secret/vcluster-smoke --timeout=60s
       - kubectl -n argocd get secret vcluster-smoke -o jsonpath='{.metadata.labels.argocd\.argoproj\.io/secret-type}' | grep -qx cluster
       - kubectl -n vcluster-system delete statefulset smoke --wait=false
       - kubectl -n argocd wait --for=delete secret/vcluster-smoke --timeout=60s
+      - kubectl -n vcluster-system logs -l app.kubernetes.io/name=vcluster-argocd-enroller --tail=-1 | grep -ciE 'forbidden|Cannot connect' | grep -qx 0
 
   k3d-down:
     desc: "Delete the k3d test cluster"

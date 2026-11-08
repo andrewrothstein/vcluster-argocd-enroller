@@ -246,6 +246,7 @@ jobs:
             --set image.repository=vcluster-argocd-enroller \
             --set image.tag=test \
             --set image.pullPolicy=Never \
+            --set networkPolicy.enabled=true \
             --set operator.logLevel=DEBUG \
             --set readinessProbe.initialDelaySeconds=5 \
             --set readinessProbe.periodSeconds=5 \
