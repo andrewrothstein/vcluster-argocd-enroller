@@ -65,6 +65,11 @@ python_version = "3.13"
 ignore_missing_imports = true
 strict = false
 
+[[tool.mypy.overrides]]
+# kubernetes >=37 ships py.typed; treat as untyped until call sites are annotated
+module = "kubernetes.*"
+follow_imports = "skip"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
