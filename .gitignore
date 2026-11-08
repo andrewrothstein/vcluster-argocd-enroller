@@ -165,3 +165,4 @@ secrets/
 .dolt/
 *.db
 .beads-credential-key
+.act/

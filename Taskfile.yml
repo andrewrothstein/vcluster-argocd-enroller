@@ -100,3 +100,61 @@ tasks:
       NAMESPACE: '{{ .NAMESPACE | default "vcluster-system" }}'
     cmds:
       - helm template vcluster-argocd-enroller ./helm/vcluster-argocd-enroller --namespace {{ .NAMESPACE }}
+
+  k3d-up:
+    desc: "Create a k3d cluster, build the image, and install the chart"
+    vars:
+      CLUSTER: '{{ .CLUSTER | default "enroller-test" }}'
+    cmds:
+      - k3d cluster delete {{ .CLUSTER }}
+      - k3d cluster create {{ .CLUSTER }} --agents 1 --no-lb --k3s-arg "--disable=traefik,servicelb,metrics-server@server:*"
+      - docker build -t vcluster-argocd-enroller:test .
+      - k3d image import vcluster-argocd-enroller:test -c {{ .CLUSTER }}
+      - kubectl create namespace vcluster-system
+      - kubectl create namespace argocd
+      - >-
+        helm install test-release ./helm/vcluster-argocd-enroller --namespace vcluster-system --wait --timeout 3m
+        --set image.repository=vcluster-argocd-enroller --set image.tag=test --set image.pullPolicy=Never
+        --set operator.logLevel=DEBUG --set readinessProbe.initialDelaySeconds=5 --set readinessProbe.periodSeconds=5
+        --set livenessProbe.initialDelaySeconds=15
+
+  k3d-smoke:
+    desc: "Enroll a fake vCluster in the current kube context and verify ArgoCD secret create/delete"
+    cmds:
+      - defer: kubectl delete -f tests/k3d/fake-vcluster.yaml --ignore-not-found --wait=false
+      - kubectl apply -f tests/k3d/fake-vcluster.yaml
+      - kubectl -n argocd wait --for=create secret/vcluster-smoke --timeout=60s
+      - kubectl -n argocd get secret vcluster-smoke -o jsonpath='{.metadata.labels.argocd\.argoproj\.io/secret-type}' | grep -qx cluster
+      - kubectl -n vcluster-system delete statefulset smoke --wait=false
+      - kubectl -n argocd wait --for=delete secret/vcluster-smoke --timeout=60s
+
+  k3d-down:
+    desc: "Delete the k3d test cluster"
+    vars:
+      CLUSTER: '{{ .CLUSTER | default "enroller-test" }}'
+    cmds:
+      - k3d cluster delete {{ .CLUSTER }}
+
+  k3d-test:
+    desc: "Full local k3d integration test (cluster up, smoke test, cluster down)"
+    cmds:
+      - task: k3d-up
+      - defer: { task: k3d-down }
+      - task: k3d-smoke
+
+  act-integration:
+    desc: "Run the CI integration-test job locally with act (mounts k3d/kubectl, which GitHub runners preinstall)"
+    vars:
+      # k3d-action reinstalls k3d unless this exact version (its default) is already on PATH
+      K3D_VERSION: '{{ .K3D_VERSION | default "v5.4.6" }}'
+      KUBECTL_VERSION: '{{ .KUBECTL_VERSION | default "v1.35.0" }}'
+    cmds:
+      - defer: k3d cluster delete test-cluster
+      - k3d cluster delete test-cluster
+      - mkdir -p .act
+      - test -x .act/k3d || curl -fsSL -o .act/k3d https://github.com/k3d-io/k3d/releases/download/{{ .K3D_VERSION }}/k3d-linux-amd64
+      - test -x .act/kubectl || curl -fsSL -o .act/kubectl https://dl.k8s.io/release/{{ .KUBECTL_VERSION }}/bin/linux/amd64/kubectl
+      - chmod +x .act/k3d .act/kubectl
+      - >-
+        act pull_request -j integration-test -P ubuntu-latest=catthehacker/ubuntu:act-latest
+        --container-options "--privileged -v {{ .ROOT_DIR }}/.act/k3d:/usr/local/bin/k3d:ro -v {{ .ROOT_DIR }}/.act/kubectl:/usr/local/bin/kubectl:ro"

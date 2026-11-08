@@ -1,0 +1,35 @@
+# Fake vCluster used by `task k3d-smoke`: a zero-replica StatefulSet plus the vc-<name> secret
+# the operator reads. No real vcluster (or image pull beyond pause) is needed.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: vc-smoke
+  namespace: vcluster-system
+stringData:
+  certificate-authority: Y2E=
+  client-certificate: Y2VydA==
+  client-key: a2V5
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: smoke
+  namespace: vcluster-system
+  labels:
+    app: vcluster
+spec:
+  replicas: 0
+  serviceName: smoke
+  selector:
+    matchLabels:
+      app: vcluster
+      release: smoke
+  template:
+    metadata:
+      labels:
+        app: vcluster
+        release: smoke
+    spec:
+      containers:
+        - name: pause
+          image: registry.k8s.io/pause:3.10

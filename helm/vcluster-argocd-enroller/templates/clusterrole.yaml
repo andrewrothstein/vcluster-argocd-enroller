@@ -14,6 +14,10 @@ rules:
 - apiGroups: ["apps"]
   resources: ["statefulsets"]
   verbs: ["get", "list", "watch", "patch", "update"]
+# kopf records handler results in the object's status; without this it retries and stalls delete handling.
+- apiGroups: ["apps"]
+  resources: ["statefulsets/status"]
+  verbs: ["patch", "update"]
 - apiGroups: [""]
   resources: ["events"]
   verbs: ["create", "patch"]

@@ -29,23 +29,14 @@ spec:
       port: 53
     - protocol: TCP
       port: 53
-  # Allow Kubernetes API
-  - to:
-    - namespaceSelector: {}
-      podSelector:
-        matchLabels:
-          component: kube-apiserver
-    ports:
+  # Allow Kubernetes API. The API server is not a pod (the kubernetes Service resolves to node
+  # addresses, port 443 or 6443 depending on distribution), so it cannot be matched by a pod
+  # selector; allow by port only.
+  - ports:
     - protocol: TCP
       port: 443
-  - to:
-    - namespaceSelector: {}
-      podSelector:
-        matchLabels:
-          app: kubernetes
-    ports:
     - protocol: TCP
-      port: 443
+      port: 6443
   {{- with .Values.networkPolicy.egress }}
     {{- toYaml . | nindent 2 }}
   {{- end }}
