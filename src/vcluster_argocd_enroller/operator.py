@@ -2,6 +2,7 @@ import base64
 import json
 import logging
 import os
+from typing import cast
 
 import kopf
 from kubernetes import client, config
@@ -63,6 +64,7 @@ def encode(s: str) -> str:
 def _build_argocd_secret(vcluster_name: str, namespace: str, vc_secret: client.V1Secret) -> dict:
     """Build the ArgoCD cluster secret body."""
     argocd_secret_name = ar_secret_name(vcluster_name)
+    vc_data = vc_secret.data or {}
     return {
         "apiVersion": "v1",
         "kind": "Secret",
@@ -78,9 +80,9 @@ def _build_argocd_secret(vcluster_name: str, namespace: str, vc_secret: client.V
                 json.dumps(
                     {
                         "tlsClientConfig": {
-                            "caData": vc_secret.data["certificate-authority"],
-                            "certData": vc_secret.data["client-certificate"],
-                            "keyData": vc_secret.data["client-key"],
+                            "caData": vc_data["certificate-authority"],
+                            "certData": vc_data["client-certificate"],
+                            "keyData": vc_data["client-key"],
                             "insecure": False,
                         }
                     }
@@ -124,12 +126,14 @@ def handle_vcluster_enrollment(statefulset_name: str, namespace: str, **kwargs):
 
     # Idempotent create-or-update
     try:
-        core_v1_api.create_namespaced_secret(ARGOCD_NAMESPACE, secret_body)
+        core_v1_api.create_namespaced_secret(ARGOCD_NAMESPACE, cast(client.V1Secret, secret_body))
         logger.info(f"Created ArgoCD cluster secret {argocd_secret_name} for vcluster {vcluster_name}")
     except ApiException as e:
         if e.status == 409:
             logger.info(f"ArgoCD secret {argocd_secret_name} already exists, updating")
-            core_v1_api.replace_namespaced_secret(argocd_secret_name, ARGOCD_NAMESPACE, secret_body)
+            core_v1_api.replace_namespaced_secret(
+                argocd_secret_name, ARGOCD_NAMESPACE, cast(client.V1Secret, secret_body)
+            )
             logger.info(f"Updated ArgoCD cluster secret {argocd_secret_name} for vcluster {vcluster_name}")
         else:
             logger.error(f"API error creating ArgoCD secret {argocd_secret_name}: {e.status} {e.reason}")

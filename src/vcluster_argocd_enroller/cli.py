@@ -166,13 +166,16 @@ def check(
     table.add_column("ArgoCD Secret", style="magenta")
 
     for sts in statefulsets.items:
+        if not sts.metadata or not sts.metadata.namespace or not sts.metadata.name:
+            continue
         ns = sts.metadata.namespace
         name = sts.metadata.name
 
         vcluster_name = vc_name(name)
 
         # Check readiness
-        ready = f"{sts.status.ready_replicas or 0}/{sts.spec.replicas}"
+        ready_replicas = sts.status.ready_replicas if sts.status else None
+        ready = f"{ready_replicas or 0}/{sts.spec.replicas}"
 
         # Check for vcluster secret
         vc_secret_name = f"vc-{vcluster_name}"
@@ -197,6 +200,8 @@ def check(
     if show_secrets:
         console.print("\n[bold]Secret Details:[/bold]")
         for sts in statefulsets.items:
+            if not sts.metadata or not sts.metadata.namespace or not sts.metadata.name:
+                continue
             ns = sts.metadata.namespace
             name = sts.metadata.name
             vcluster_name = vc_name(name)
@@ -225,6 +230,7 @@ def enroll(
         Force re-enrollment even if already exists
     """
     import json
+    from typing import cast
 
     from kubernetes import client, config
 
@@ -257,6 +263,7 @@ def enroll(
         console.print(f"[red]Failed to read vCluster secret {vc_secret_name}: {e}[/red]")
         sys.exit(1)
 
+    vc_data = vc_secret.data or {}
     argocd_secret = {
         "apiVersion": "v1",
         "kind": "Secret",
@@ -272,9 +279,9 @@ def enroll(
                 json.dumps(
                     {
                         "tlsClientConfig": {
-                            "caData": vc_secret.data["certificate-authority"],
-                            "certData": vc_secret.data["client-certificate"],
-                            "keyData": vc_secret.data["client-key"],
+                            "caData": vc_data["certificate-authority"],
+                            "certData": vc_data["client-certificate"],
+                            "keyData": vc_data["client-key"],
                             "insecure": False,
                         }
                     }
@@ -292,7 +299,7 @@ def enroll(
             pass
 
     try:
-        v1.create_namespaced_secret(namespace="argocd", body=argocd_secret)
+        v1.create_namespaced_secret(namespace="argocd", body=cast(client.V1Secret, argocd_secret))
         console.print(f"[green]Successfully enrolled vCluster {vcluster_name} in ArgoCD[/green]")
     except client.exceptions.ApiException as e:
         console.print(f"[red]Failed to create ArgoCD secret: {e}[/red]")
