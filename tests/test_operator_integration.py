@@ -115,7 +115,7 @@ class TestOperatorHandlers:
         assert "server" in secret_body["data"]
         assert "config" in secret_body["data"]
 
-        assert result == {"status": "Success"}
+        assert result is None
 
     def test_vcluster_created_idempotent_on_conflict(self, k8s_mocked):
         """Test that 409 Conflict on create falls back to replace."""
@@ -138,7 +138,7 @@ class TestOperatorHandlers:
 
         # Should have fallen back to replace
         mock_core.replace_namespaced_secret.assert_called_once()
-        assert result == {"status": "Success"}
+        assert result is None
 
     def test_vcluster_updated_handler(self, k8s_mocked):
         """Test that vcluster update triggers ArgoCD re-enrollment."""
@@ -159,7 +159,7 @@ class TestOperatorHandlers:
         )
 
         mock_core.create_namespaced_secret.assert_called_once()
-        assert result == {"status": "Success"}
+        assert result is None
 
     def test_vcluster_deleted_handler(self, k8s_mocked):
         """Test that vcluster deletion triggers ArgoCD cleanup."""
@@ -176,7 +176,7 @@ class TestOperatorHandlers:
 
         # Verify ArgoCD secret was deleted
         mock_core.delete_namespaced_secret.assert_called_once_with(name="vcluster-test-cluster", namespace="argocd")
-        assert result == {"status": "Success"}
+        assert result is None
 
     def test_vcluster_with_prefix_name(self, k8s_mocked):
         """Test handling of vcluster with 'vcluster-' prefix in StatefulSet name."""
@@ -225,6 +225,51 @@ class TestOperatorHandlers:
 
         assert "Failed to read vcluster secret" in str(exc_info.value)
         assert exc_info.value.delay == 60
+
+    def test_missing_vcluster_secret_logs_warning_not_error(self, k8s_mocked, caplog):
+        """A 404 right after the StatefulSet appears is expected ordering, so it must not log ERROR."""
+        from vcluster_argocd_enroller import operator
+
+        mock_core, _ = k8s_mocked
+        mock_core.read_namespaced_secret.side_effect = ApiException(status=404)
+        statefulset = create_vcluster_statefulset()
+
+        with caplog.at_level("WARNING"), pytest.raises(kopf.TemporaryError):
+            operator.vcluster_created(
+                name=statefulset["metadata"]["name"],
+                namespace=statefulset["metadata"]["namespace"],
+                meta=statefulset["metadata"],
+                spec=statefulset["spec"],
+            )
+
+        records = [r for r in caplog.records if "reading vcluster secret" in r.getMessage()]
+        assert records and all(r.levelname == "WARNING" for r in records)
+
+    def test_non_404_read_error_still_logs_error(self, k8s_mocked, caplog):
+        from vcluster_argocd_enroller import operator
+
+        mock_core, _ = k8s_mocked
+        mock_core.read_namespaced_secret.side_effect = ApiException(status=500)
+        statefulset = create_vcluster_statefulset()
+
+        with caplog.at_level("WARNING"), pytest.raises(kopf.TemporaryError):
+            operator.vcluster_created(
+                name=statefulset["metadata"]["name"],
+                namespace=statefulset["metadata"]["namespace"],
+                meta=statefulset["metadata"],
+                spec=statefulset["spec"],
+            )
+
+        assert any(r.levelname == "ERROR" and "reading vcluster secret" in r.getMessage() for r in caplog.records)
+
+    def test_configure_uses_annotation_storage(self):
+        from vcluster_argocd_enroller import operator
+
+        settings = kopf.OperatorSettings()
+        operator.configure(settings=settings)
+
+        assert isinstance(settings.persistence.progress_storage, kopf.AnnotationsProgressStorage)
+        assert isinstance(settings.persistence.diffbase_storage, kopf.AnnotationsDiffBaseStorage)
 
     def test_argocd_secret_already_deleted(self, k8s_mocked):
         """Test graceful handling when ArgoCD secret is already deleted."""

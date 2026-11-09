@@ -107,7 +107,9 @@ def handle_vcluster_enrollment(statefulset_name: str, namespace: str, **kwargs):
     try:
         vc_secret = core_v1_api.read_namespaced_secret(name=vcluster_secret_name, namespace=namespace)
     except ApiException as e:
-        logger.error(f"API error reading vcluster secret {namespace}/{vcluster_secret_name}: {e.status} {e.reason}")
+        # 404 is expected right after the StatefulSet appears: vcluster writes vc-<name> a little later.
+        log = logger.warning if e.status == 404 else logger.error
+        log(f"API error reading vcluster secret {namespace}/{vcluster_secret_name}: {e.status} {e.reason}")
         raise kopf.TemporaryError(
             f"Failed to read vcluster secret {namespace}/{vcluster_secret_name}: {e.status} {e.reason}",
             delay=60,
@@ -146,6 +148,10 @@ def handle_vcluster_enrollment(statefulset_name: str, namespace: str, **kwargs):
 def configure(settings: kopf.OperatorSettings, **_):
     """Configure operator settings."""
     settings.posting.enabled = False
+    # Keep kopf's progress/diffbase on annotations: the StatefulSet controller owns .status and drops
+    # kopf's patches there, so retries would not survive an operator restart.
+    settings.persistence.progress_storage = kopf.AnnotationsProgressStorage()
+    settings.persistence.diffbase_storage = kopf.AnnotationsDiffBaseStorage()
     settings.watching.connect_timeout = 1 * 60
     settings.watching.server_timeout = 10 * 60
 
@@ -154,26 +160,32 @@ def configure(settings: kopf.OperatorSettings, **_):
 def vcluster_created(name, namespace, meta, spec, **kwargs):
     """Handle vcluster StatefulSet creation."""
     logger.info(f"Detected new vcluster StatefulSet: {namespace}/{name}")
-    return handle_vcluster_enrollment(name, namespace, **kwargs)
+    # No return value: kopf would persist it into the StatefulSet status, which the controller drops.
+    handle_vcluster_enrollment(name, namespace, **kwargs)
 
 
 @kopf.on.resume("statefulsets", labels={"app": "vcluster"})
 def vcluster_resumed(name, namespace, meta, spec, **kwargs):
     """Handle existing vcluster StatefulSets when operator starts."""
     logger.info(f"Detected existing vcluster StatefulSet: {namespace}/{name}")
-    return handle_vcluster_enrollment(name, namespace, **kwargs)
+    # No return value: kopf would persist it into the StatefulSet status, which the controller drops.
+    handle_vcluster_enrollment(name, namespace, **kwargs)
 
 
 @kopf.on.update("statefulsets", labels={"app": "vcluster"})
 def vcluster_updated(name, namespace, meta, spec, **kwargs):
     """Handle vcluster StatefulSet updates (e.g. cert rotation)."""
     logger.info(f"Detected vcluster StatefulSet update: {namespace}/{name}")
-    return handle_vcluster_enrollment(name, namespace, **kwargs)
+    # No return value: kopf would persist it into the StatefulSet status, which the controller drops.
+    handle_vcluster_enrollment(name, namespace, **kwargs)
 
 
 @kopf.on.delete("statefulsets", labels={"app": "vcluster"})
 def vcluster_deleted(name, namespace, **kwargs):
-    """Handle vcluster StatefulSet deletion."""
+    """Handle vcluster StatefulSet deletion.
+
+    Returns nothing: kopf would persist a return value into the StatefulSet status, which is being dropped.
+    """
     core_v1_api, _ = _ensure_k8s()
 
     logger.info(f"Detected vcluster StatefulSet deletion: {namespace}/{name}")
@@ -186,15 +198,12 @@ def vcluster_deleted(name, namespace, **kwargs):
     try:
         core_v1_api.delete_namespaced_secret(name=argocd_secret_name, namespace=ARGOCD_NAMESPACE)
         logger.info(f"Successfully deleted ArgoCD cluster secret {argocd_secret_name}")
-        return {"status": "Success"}
     except ApiException as e:
         if e.status == 404:
             logger.info(f"ArgoCD secret {argocd_secret_name} not found, already deleted")
         else:
             logger.error(f"Failed to delete ArgoCD cluster secret {argocd_secret_name}: {e.status} {e.reason}")
             # Don't raise PermanentError on deletion - allow finalizer removal
-            return {"status": "Failed", "message": f"{e.status} {e.reason}"}
     except Exception as e:
         logger.error(f"Failed to remove vcluster {namespace}/{vcluster_name} from ArgoCD: {e}")
         # Don't raise PermanentError on deletion - allow finalizer removal
-        return {"status": "Failed", "message": str(e)}
