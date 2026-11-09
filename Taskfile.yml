@@ -146,10 +146,10 @@ tasks:
       - task: k3d-smoke
 
   act-integration:
-    desc: "Run the CI integration-test job locally with act (mounts k3d/kubectl, which GitHub runners preinstall)"
+    desc: "Run the CI integration-test job locally with act (mounts k3d/kubectl, since the act image lacks them)"
     vars:
-      # k3d-action reinstalls k3d unless this exact version (its default) is already on PATH
-      K3D_VERSION: '{{ .K3D_VERSION | default "v5.4.6" }}'
+      # Must match k3d-version in ci.yaml: k3d-action reinstalls k3d unless that exact version is on PATH
+      K3D_VERSION: '{{ .K3D_VERSION | default "v5.9.0" }}'
       KUBECTL_VERSION: '{{ .KUBECTL_VERSION | default "v1.35.0" }}'
     cmds:
       - defer: k3d cluster delete test-cluster
