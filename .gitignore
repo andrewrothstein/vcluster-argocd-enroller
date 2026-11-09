@@ -166,3 +166,4 @@ secrets/
 *.db
 .beads-credential-key
 .act/
+.beads.gate.lock
