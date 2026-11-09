@@ -63,7 +63,11 @@ The following table lists the configurable parameters and their default values:
 | `rbac.create` | Create RBAC resources | `true` |
 | `autoscaling.enabled` | Enable HPA | `false` |
 | `podDisruptionBudget.enabled` | Enable PDB | `false` |
-| `networkPolicy.enabled` | Enable NetworkPolicy | `false` |
+| `networkPolicy.enabled` | Enable NetworkPolicy | `true` |
+| `networkPolicy.healthPort` | Health probe port allowed for ingress | `8080` |
+| `networkPolicy.apiServer.cidr` | CIDR allowed for API server egress | `0.0.0.0/0` |
+| `networkPolicy.apiServer.port` | API server egress port | `443` |
+| `networkPolicy.apiServer.additionalPorts` | Extra API server egress ports | `[6443]` |
 | `monitoring.enabled` | Enable Prometheus metrics | `false` |
 
 ### Using External Operator Code
@@ -142,18 +146,19 @@ autoscaling:
 
 ### Network Policies
 
-To restrict network access:
+The NetworkPolicy is enabled by default. It allows DNS, egress to the Kubernetes API server, and
+ingress on the health port for kubelet probes. The API server is not a pod on k3s, k3d, RKE2 and
+most managed clusters, so it is allowed by `ipBlock` and port rather than by pod selector. The
+default CIDR `0.0.0.0/0` works everywhere; tighten it to your API endpoint where you know it:
 
 ```yaml
 networkPolicy:
   enabled: true
-  ingress: []  # No ingress required for the operator
-  egress:
-    # Additional egress rules if needed
-    - to:
-      - namespaceSelector:
-          matchLabels:
-            name: argocd
+  apiServer:
+    cidr: 10.0.0.5/32   # your API server address
+    port: 443
+    additionalPorts: [6443]  # some distributions NAT the ClusterIP to 6443
+  egress: []  # additional egress rules if needed
 ```
 
 ### Monitoring

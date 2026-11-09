@@ -246,10 +246,17 @@ jobs:
             --set image.repository=vcluster-argocd-enroller \
             --set image.tag=test \
             --set image.pullPolicy=Never \
+            --set networkPolicy.enabled=true \
             --set operator.logLevel=DEBUG \
             --set readinessProbe.initialDelaySeconds=5 \
             --set readinessProbe.periodSeconds=5 \
             --set livenessProbe.initialDelaySeconds=15
+
+      - name: Install Task
+        uses: arduino/setup-task@c0bc642852239c2689f73f4ea6459c29405f3c52 # ratchet:arduino/setup-task@v3
+
+      - name: Run enrollment smoke test
+        run: task k3d-smoke
 
       - name: Check deployment
         if: always()

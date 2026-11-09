@@ -124,10 +124,22 @@ networkPolicy:
   # Enable network policy
   enabled: true
 
-  # Ingress rules
+  # Port the operator serves health probes on; ingress is allowed to it so kubelet probes work
+  healthPort: 8080
+
+  # Kubernetes API server egress. The API server is usually not a pod, so it is allowed by
+  # address and port. Tighten cidr to your API endpoint (e.g. 10.0.0.5/32) where known.
+  apiServer:
+    cidr: 0.0.0.0/0
+    port: 443
+    # Extra ports, for distributions that NAT the kubernetes Service to e.g. 6443 before policy applies
+    additionalPorts:
+      - 6443
+
+  # Additional ingress rules
   ingress: []
 
-  # Egress rules
+  # Additional egress rules
   egress: []
 
 # Pod Disruption Budget configuration
