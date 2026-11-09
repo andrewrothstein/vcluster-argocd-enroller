@@ -1497,7 +1497,7 @@ wheels = [
 
 [[package]]
 name = "vcluster-argocd-enroller"
-version = "1.2.1"
+version = "1.2.2"
 source = { editable = "." }
 dependencies = [
     { name = "cyclopts" },
