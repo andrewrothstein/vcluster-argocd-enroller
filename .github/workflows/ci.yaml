@@ -161,8 +161,8 @@ jobs:
         run: |
           helm template test helm/vcluster-argocd-enroller --namespace vcluster-system | \
             kubeconform -strict -summary -output json
-          # With leader election: the CRD is validated, its ClusterKopfPeering object has no published schema
-          helm template test helm/vcluster-argocd-enroller --namespace vcluster-system --include-crds \
+          # With leader election. ClusterKopfPeering has no published schema; the k3d job installs and uses it
+          helm template test helm/vcluster-argocd-enroller --namespace vcluster-system \
             --set leaderElection.enabled=true --set replicaCount=2 | \
             kubeconform -strict -summary -output json -skip ClusterKopfPeering
 
