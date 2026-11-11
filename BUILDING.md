@@ -5,8 +5,8 @@ A Kubernetes operator with CLI that automatically enrolls vCluster instances in 
 ## Overview
 
 This operator watches for vCluster StatefulSets and automatically:
-1. Extracts the vCluster kubeconfig from its secret
-2. Creates an ArgoCD cluster secret with proper authentication
+1. Extracts the vCluster credentials from its secret
+2. Creates an ArgoCD cluster secret with proper authentication, and keeps it in sync
 3. Cleans up ArgoCD secrets when vClusters are deleted
 
 ## Setup
@@ -34,7 +34,7 @@ uv pip install -e .
 # Run the operator
 uv run vcluster-argocd-enroller
 
-# Run in development mode (verbose, takes priority over other instances)
+# Run in development mode (verbose; with --peering-name it outranks, and so pauses, the deployed instances)
 uv run vcluster-argocd-enroller --dev --verbose
 
 # Check vCluster enrollment status
@@ -44,7 +44,10 @@ uv run vcluster-argocd-enroller check
 uv run vcluster-argocd-enroller enroll my-vcluster --namespace vcluster-ns
 
 # Remove a vCluster from ArgoCD
-uv run vcluster-argocd-enroller unenroll my-vcluster --confirm
+uv run vcluster-argocd-enroller unenroll my-vcluster vcluster-ns --confirm
+
+# Connect to a vCluster with the credentials enrolled in ArgoCD (from inside the cluster)
+vcluster-argocd-enroller verify my-vcluster vcluster-ns
 
 # Run with specific namespace watching
 uv run vcluster-argocd-enroller --namespace my-namespace
@@ -70,8 +73,15 @@ uv run pytest
 # Run unit tests with coverage
 uv run pytest --cov=vcluster_argocd_enroller
 
-# Run e2e tests (requires real cluster)
-uv run pytest -m e2e
+# Integration test in a throwaway k3d cluster: chart install, fake vClusters, then a real vcluster
+# whose enrolled credentials are checked against its API server (needs docker, k3d, kubectl, helm)
+task k3d-test
+
+# The same steps one at a time, keeping the cluster around
+task k3d-up
+task k3d-smoke
+task k3d-vcluster
+task k3d-down
 
 # Check existing vClusters
 uv run vcluster-argocd-enroller check --show-secrets
@@ -87,21 +97,35 @@ task build
 
 The operator monitors StatefulSets with the label `app: vcluster` and:
 
-1. **On Create/Resume**:
-   - Extracts kubeconfig from secret `vc-{vcluster-name}`
-   - Creates ArgoCD cluster secret in `argocd` namespace
+1. **On Create/Resume/Update, and every `RESYNC_INTERVAL` seconds**:
+   - Extracts the credentials from secret `vc-{vcluster-name}`
+   - Creates ArgoCD cluster secret `vcluster-{namespace}-{vcluster-name}` in the ArgoCD namespace, or replaces it
+     when its content differs
    - Secret contains cluster endpoint and TLS certificates
+   - Removes the `vcluster-{vcluster-name}` secret written by 1.x for the same vCluster
 
 2. **On Delete**:
    - Removes the corresponding ArgoCD cluster secret
    - Cleans up gracefully even if secret doesn't exist
 
+Secrets that the operator did not write for that vCluster are never replaced or deleted.
+
 ## Configuration
 
 The operator expects:
 - vCluster secrets named: `vc-{vcluster-name}`
-- ArgoCD installed in namespace: `argocd`
 - vCluster StatefulSets labeled with: `app=vcluster`
+
+Environment variables (the Helm chart sets them from its values):
+
+| Variable | Meaning | Default |
+| -------- | ------- | ------- |
+| `ARGOCD_NAMESPACE` | Namespace ArgoCD is installed in | `argocd` |
+| `SERVER_URL` | Address ArgoCD reaches a vCluster at; `{name}` and `{namespace}` are replaced | `https://{name}.{namespace}` |
+| `RESYNC_INTERVAL` | Seconds between re-syncs of each vCluster | `300` |
+| `LOG_LEVEL` | `DEBUG`, `INFO`, `WARNING` or `ERROR` | `INFO` |
+| `HEALTH_PORT` | Port serving `/healthz` | `8080` |
+| `PEERING_NAME` | kopf peering object to run leader election in; unset means no peering | unset |
 
 ## Development
 
@@ -122,9 +146,9 @@ vcluster-argocd-enroller/
 │       └── operator.py       # Kopf operator logic
 ├── tests/
 │   ├── __init__.py
-│   ├── conftest.py          # Pytest fixtures
-│   ├── test_operator_integration.py  # Unit tests with mocked K8s
-│   └── test_e2e.py          # End-to-end tests (requires cluster)
+│   ├── test_cli.py          # CLI tests with mocked kopf and K8s
+│   ├── test_operator_integration.py  # Handler tests with mocked K8s
+│   └── k3d/                 # Manifests for the k3d integration test (task k3d-test)
 ├── pyproject.toml            # Python project configuration (uv)
 ├── uv.lock                   # Locked dependencies
 ├── pytest.ini                # Pytest configuration

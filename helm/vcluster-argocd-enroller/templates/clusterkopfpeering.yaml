@@ -1,0 +1,9 @@
+{{- if .Values.leaderElection.enabled }}
+# The replicas announce themselves here; the one with the highest priority works, the rest stand by.
+apiVersion: kopf.dev/v1
+kind: ClusterKopfPeering
+metadata:
+  name: {{ include "vcluster-argocd-enroller.fullname" . }}
+  labels:
+    {{- include "vcluster-argocd-enroller.labels" . | nindent 4 }}
+{{- end }}

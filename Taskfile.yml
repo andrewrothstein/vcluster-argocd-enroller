@@ -28,18 +28,6 @@ tasks:
     cmds:
       - uv run pytest tests/ -v
 
-  test-quick:
-    desc: "Run quick tests (skip e2e, same selection as CI)"
-    deps: [install-dev]
-    cmds:
-      - uv run pytest tests/ -v -m "not e2e"
-
-  test-e2e:
-    desc: "Run end-to-end tests against the current cluster (needs vcluster CLI, ArgoCD namespace, running operator)"
-    deps: [install-dev]
-    cmds:
-      - uv run pytest tests/ -v -s -m e2e
-
   test-cli:
     desc: "Test CLI commands"
     deps: [install-dev]
@@ -109,6 +97,11 @@ tasks:
       - k3d cluster create {{ .CLUSTER }} --agents 1 --no-lb --k3s-arg "--disable=traefik,servicelb,metrics-server@server:*"
       - docker build -t vcluster-argocd-enroller:test .
       - k3d image import vcluster-argocd-enroller:test -c {{ .CLUSTER }}
+      - task: k3d-install
+
+  k3d-install:
+    desc: "Install the chart the way the k3d tests expect it: image vcluster-argocd-enroller:test, two replicas with leader election, quick re-sync"
+    cmds:
       - kubectl create namespace vcluster-system
       - kubectl create namespace argocd
       - >-
@@ -116,19 +109,54 @@ tasks:
         --set image.repository=vcluster-argocd-enroller --set image.tag=test --set image.pullPolicy=Never
         --set networkPolicy.enabled=true --set operator.logLevel=DEBUG --set readinessProbe.initialDelaySeconds=5 --set readinessProbe.periodSeconds=5
         --set livenessProbe.initialDelaySeconds=15
+        --set replicaCount=2 --set leaderElection.enabled=true --set operator.resyncInterval=15
 
   k3d-smoke:
-    desc: "Verify the operator is Ready under its NetworkPolicy, then enroll a fake vCluster and check ArgoCD secret create/delete"
+    desc: "Verify the operator is Ready under its NetworkPolicy with one active replica, then enroll fake vClusters and check the ArgoCD secrets through create, migration, re-sync and delete"
     cmds:
       - kubectl -n vcluster-system get networkpolicy test-release-vcluster-argocd-enroller
       - kubectl -n vcluster-system wait --for=condition=Ready pod -l app.kubernetes.io/name=vcluster-argocd-enroller --timeout=120s
       - defer: kubectl delete -f tests/k3d/fake-vcluster.yaml --ignore-not-found --wait=false
       - kubectl apply -f tests/k3d/fake-vcluster.yaml
-      - kubectl -n argocd wait --for=create secret/vcluster-smoke --timeout=60s
-      - kubectl -n argocd get secret vcluster-smoke -o jsonpath='{.metadata.labels.argocd\.argoproj\.io/secret-type}' | grep -qx cluster
-      - kubectl -n vcluster-system delete statefulset smoke --wait=false
+      # Two vClusters called smoke, one per namespace, are enrolled side by side
+      - kubectl -n argocd wait --for=create secret/vcluster-vcluster-system-smoke --timeout=60s
+      - kubectl -n argocd wait --for=create secret/vcluster-team-b-smoke --timeout=60s
+      - kubectl -n argocd get secret vcluster-team-b-smoke -o jsonpath='{.metadata.labels.argocd\.argoproj\.io/secret-type}' | grep -qx cluster
+      - kubectl -n argocd get secret vcluster-team-b-smoke -o jsonpath='{.data.name}' | base64 -d | grep -qx team-b-smoke
+      # The enrollment made under the pre-2.0.0 name is migrated
       - kubectl -n argocd wait --for=delete secret/vcluster-smoke --timeout=60s
+      # A removed enrollment comes back with the next re-sync
+      - kubectl -n argocd delete secret vcluster-team-b-smoke
+      - kubectl -n argocd wait --for=create secret/vcluster-team-b-smoke --timeout=60s
+      # Deleting one vCluster leaves its namesake enrolled
+      - kubectl -n vcluster-system delete statefulset smoke --wait=false
+      - kubectl -n argocd wait --for=delete secret/vcluster-vcluster-system-smoke --timeout=60s
+      - kubectl -n argocd get secret vcluster-team-b-smoke
+      - kubectl -n team-b delete statefulset smoke --wait=false
+      - kubectl -n argocd wait --for=delete secret/vcluster-team-b-smoke --timeout=60s
+      # Leader election: the two replicas are peers, and only one of them handled the vCluster
+      - kubectl get clusterkopfpeering test-release-vcluster-argocd-enroller -o jsonpath='{range .status.*}{.priority}{"\n"}{end}' | grep -c . | grep -qx 2
+      - kubectl -n vcluster-system logs -l app.kubernetes.io/name=vcluster-argocd-enroller --tail=-1 --prefix | grep -F 'Detected new vcluster StatefulSet{{":"}} team-b/smoke' | cut -d' ' -f1 | sort -u | grep -c . | grep -qx 1
       - kubectl -n vcluster-system logs -l app.kubernetes.io/name=vcluster-argocd-enroller --tail=-1 | grep -ciE 'forbidden|Cannot connect|inconsistencies' | grep -qx 0
+
+  k3d-vcluster:
+    desc: "Install a real vcluster and check the credentials enrolled in ArgoCD reach its API server"
+    vars:
+      VCLUSTER_VERSION: '{{ .VCLUSTER_VERSION | default "0.37.7" }}'
+    cmds:
+      - defer: kubectl delete namespace team-a --ignore-not-found --wait=false
+      - >-
+        helm install vcluster-demo vcluster --repo https://charts.loft.sh --version {{ .VCLUSTER_VERSION }}
+        --namespace team-a --create-namespace --wait --timeout 5m
+      - kubectl -n argocd wait --for=create secret/vcluster-team-a-vcluster-demo --timeout=180s
+      # Connect the way ArgoCD will, from a pod the operator's NetworkPolicy does not select
+      - >-
+        kubectl -n vcluster-system run verify-enrollment --rm -i --restart=Never --quiet
+        --image=vcluster-argocd-enroller:test --image-pull-policy=Never
+        --overrides='{"spec":{"serviceAccountName":"test-release-vcluster-argocd-enroller"}}'
+        --command -- vcluster-argocd-enroller verify vcluster-demo team-a
+      - helm uninstall vcluster-demo --namespace team-a --wait --timeout 3m
+      - kubectl -n argocd wait --for=delete secret/vcluster-team-a-vcluster-demo --timeout=120s
 
   k3d-down:
     desc: "Delete the k3d test cluster"
@@ -138,11 +166,12 @@ tasks:
       - k3d cluster delete {{ .CLUSTER }}
 
   k3d-test:
-    desc: "Full local k3d integration test (cluster up, smoke test, cluster down)"
+    desc: "Full local k3d integration test (cluster up, smoke test, real vcluster, cluster down)"
     cmds:
       - task: k3d-up
       - defer: { task: k3d-down }
       - task: k3d-smoke
+      - task: k3d-vcluster
 
   act-integration:
     desc: "Run the CI integration-test job locally with act (mounts k3d/kubectl, since the act image lacks them)"

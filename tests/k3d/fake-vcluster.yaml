@@ -1,5 +1,27 @@
-# Fake vCluster used by `task k3d-smoke`: a zero-replica StatefulSet plus the vc-<name> secret
+# Fake vClusters used by `task k3d-smoke`: zero-replica StatefulSets plus the vc-<name> secrets
 # the operator reads. No real vcluster (or image pull beyond pause) is needed.
+#
+# Two of them share the name `smoke` in different namespaces, and ArgoCD already holds an enrollment
+# of vcluster-system/smoke under the name (and server address) used before 2.0.0, which the operator is
+# expected to migrate.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: team-b
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: vcluster-smoke
+  namespace: argocd
+  labels:
+    argocd.argoproj.io/secret-type: cluster
+    vcluster-operator: "true"
+stringData:
+  name: smoke
+  server: https://smoke.vcluster-system.svc.cluster.local
+  config: '{"tlsClientConfig":{"caData":"Y2E=","certData":"Y2VydA==","keyData":"a2V5","insecure":false}}'
+---
 apiVersion: v1
 kind: Secret
 metadata:
@@ -15,6 +37,40 @@ kind: StatefulSet
 metadata:
   name: smoke
   namespace: vcluster-system
+  labels:
+    app: vcluster
+spec:
+  replicas: 0
+  serviceName: smoke
+  selector:
+    matchLabels:
+      app: vcluster
+      release: smoke
+  template:
+    metadata:
+      labels:
+        app: vcluster
+        release: smoke
+    spec:
+      containers:
+        - name: pause
+          image: registry.k8s.io/pause:3.10
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: vc-smoke
+  namespace: team-b
+stringData:
+  certificate-authority: Y2E=
+  client-certificate: Y2VydA==
+  client-key: a2V5
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: smoke
+  namespace: team-b
   labels:
     app: vcluster
 spec:
