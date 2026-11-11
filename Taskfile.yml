@@ -29,16 +29,16 @@ tasks:
       - uv run pytest tests/ -v
 
   test-quick:
-    desc: "Run quick tests (skip integration)"
+    desc: "Run quick tests (skip e2e, same selection as CI)"
     deps: [install-dev]
     cmds:
-      - uv run pytest tests/ -v -m "not integration"
+      - uv run pytest tests/ -v -m "not e2e"
 
-  test-integration:
-    desc: "Run integration tests with real vcluster"
+  test-e2e:
+    desc: "Run end-to-end tests against the current cluster (needs vcluster CLI, ArgoCD namespace, running operator)"
     deps: [install-dev]
     cmds:
-      - uv run pytest tests/test_enrollment.py::TestVClusterEnrollment::test_vcluster_enrollment_lifecycle -v -s
+      - uv run pytest tests/ -v -s -m e2e
 
   test-cli:
     desc: "Test CLI commands"
@@ -47,9 +47,9 @@ tasks:
       - uv run pytest tests/ -v -m "cli or not operator"
 
   test-single:
-    desc: "Run a single test with vcluster lifecycle"
+    desc: "Run a single test by name (TEST_NAME=...)"
     vars:
-      TEST_NAME: '{{ .TEST_NAME | default "test_vcluster_enrollment_lifecycle" }}'
+      TEST_NAME: '{{ .TEST_NAME | default "test_vcluster_created_handler" }}'
     deps: [install-dev]
     cmds:
       - uv run pytest tests/ -k {{ .TEST_NAME }} -v -s
@@ -66,7 +66,6 @@ tasks:
       - rm -rf dist/ build/ *.egg-info .venv __pycache__
       - find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
       - rm -rf .pytest_cache .coverage htmlcov
-      - rm -f test-enrollment.sh
 
   helm-lint:
     desc: "Lint Helm chart"

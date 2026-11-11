@@ -78,19 +78,6 @@ operator:
   # Log level (DEBUG, INFO, WARNING, ERROR)
   logLevel: INFO
 
-# Monitoring configuration
-monitoring:
-  # Enable Prometheus metrics
-  enabled: false
-
-  # Service monitor configuration for Prometheus Operator
-  serviceMonitor:
-    enabled: false
-    interval: 30s
-    scrapeTimeout: 10s
-    labels: {}
-    honorLabels: true
-
 # Additional environment variables for the operator
 env: []
   # - name: EXAMPLE_VAR

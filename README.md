@@ -59,7 +59,7 @@ helm install vcluster-argocd-enroller \
   --set operator.logLevel=DEBUG
 ```
 
-See the [Helm chart README](helm/vcluster-argocd-enroller/README.md) for the full list of configurable parameters, HA setup, network policies, and monitoring options.
+See the [Helm chart README](helm/vcluster-argocd-enroller/README.md) for the full list of configurable parameters, HA setup, and network policies.
 
 ## CLI
 

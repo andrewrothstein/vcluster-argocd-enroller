@@ -34,7 +34,7 @@ uv pip install -e .
 # Run the operator
 uv run vcluster-argocd-enroller
 
-# Run in development mode with auto-reload
+# Run in development mode (verbose, takes priority over other instances)
 uv run vcluster-argocd-enroller --dev --verbose
 
 # Check vCluster enrollment status

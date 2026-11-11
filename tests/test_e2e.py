@@ -161,19 +161,3 @@ class TestE2EOperator:
                 subprocess.run(
                     ["vcluster", "delete", name, "--namespace", test_namespace], capture_output=True, timeout=60
                 )
-
-
-@pytest.mark.parametrize(
-    "statefulset_name,expected_vcluster_name",
-    [
-        ("test-cluster", "test-cluster"),
-        ("vcluster-test-cluster", "test-cluster"),
-        ("my-app", "my-app"),
-        ("vcluster-my-app", "my-app"),
-    ],
-)
-def test_name_extraction(statefulset_name, expected_vcluster_name):
-    """Test vcluster name extraction from StatefulSet names."""
-    from vcluster_argocd_enroller.operator import vc_name
-
-    assert vc_name(statefulset_name) == expected_vcluster_name

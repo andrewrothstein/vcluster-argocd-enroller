@@ -40,9 +40,11 @@ def _ensure_k8s() -> tuple[client.CoreV1Api, client.AppsV1Api]:
 
 
 def vc_name(statefulset_name: str) -> str:
-    """Extract the vCluster name from a StatefulSet name."""
-    if statefulset_name.startswith("vcluster-"):
-        return statefulset_name.replace("vcluster-", "", 1)
+    """Return the vCluster name for a StatefulSet.
+
+    vcluster names the StatefulSet, the Service and the `vc-<name>` secret after the Helm release,
+    so the name is used as-is (a release called `vcluster-foo` owns `vc-vcluster-foo`).
+    """
     return statefulset_name
 
 
@@ -61,7 +63,7 @@ def encode(s: str) -> str:
     return base64.b64encode(s.encode("utf-8")).decode("utf-8")
 
 
-def _build_argocd_secret(vcluster_name: str, namespace: str, vc_secret: client.V1Secret) -> dict:
+def build_argocd_secret(vcluster_name: str, namespace: str, vc_secret: client.V1Secret) -> dict:
     """Build the ArgoCD cluster secret body."""
     argocd_secret_name = ar_secret_name(vcluster_name)
     vc_data = vc_secret.data or {}
@@ -119,7 +121,7 @@ def handle_vcluster_enrollment(statefulset_name: str, namespace: str, **kwargs):
         raise kopf.PermanentError(f"Failed to read vcluster secret: {e}")
 
     try:
-        secret_body = _build_argocd_secret(vcluster_name, namespace, vc_secret)
+        secret_body = build_argocd_secret(vcluster_name, namespace, vc_secret)
     except (KeyError, IndexError):
         logger.error(f"Improperly formed vcluster secret: {namespace}/{vcluster_secret_name}")
         raise kopf.PermanentError(f"Failed to parse vcluster secret: {namespace}/{vcluster_secret_name}")
