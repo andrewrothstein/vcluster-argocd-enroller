@@ -59,7 +59,6 @@ The following table lists the configurable parameters and their default values:
 | `operator.vclusterNamespace` | Namespace where the operator is deployed (vClusters are watched cluster-wide) | `vcluster-system` |
 | `operator.argoCDNamespace` | ArgoCD namespace | `argocd` |
 | `operator.logLevel` | Log level (DEBUG, INFO, WARNING, ERROR) | `INFO` |
-| `operator.useEmbeddedCode` | Use embedded operator code | `true` |
 | `rbac.create` | Create RBAC resources | `true` |
 | `autoscaling.enabled` | Enable HPA | `false` |
 | `podDisruptionBudget.enabled` | Enable PDB | `false` |
@@ -68,28 +67,6 @@ The following table lists the configurable parameters and their default values:
 | `networkPolicy.apiServer.cidr` | CIDR allowed for API server egress | `0.0.0.0/0` |
 | `networkPolicy.apiServer.port` | API server egress port | `443` |
 | `networkPolicy.apiServer.additionalPorts` | Extra API server egress ports | `[6443]` |
-| `monitoring.enabled` | Enable Prometheus metrics | `false` |
-
-### Using External Operator Code
-
-If you want to use a custom operator implementation:
-
-1. Set `operator.useEmbeddedCode` to `false`
-2. Create a ConfigMap with your operator code
-3. Set `operator.externalCodeConfigMap` to your ConfigMap name
-
-Example:
-
-```bash
-kubectl create configmap custom-operator-code \
-  --from-file=operator.py=./my-custom-operator.py \
-  -n vcluster-system
-
-helm install vcluster-argocd-enroller ./helm/vcluster-argocd-enroller \
-  --namespace vcluster-system \
-  --set operator.useEmbeddedCode=false \
-  --set operator.externalCodeConfigMap=custom-operator-code
-```
 
 ## Uninstallation
 
@@ -159,20 +136,6 @@ networkPolicy:
     port: 443
     additionalPorts: [6443]  # some distributions NAT the ClusterIP to 6443
   egress: []  # additional egress rules if needed
-```
-
-### Monitoring
-
-Enable Prometheus monitoring:
-
-```yaml
-monitoring:
-  enabled: true
-  serviceMonitor:
-    enabled: true
-    interval: 30s
-    labels:
-      prometheus: kube-prometheus
 ```
 
 ## Troubleshooting

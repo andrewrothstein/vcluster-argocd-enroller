@@ -196,13 +196,16 @@ class TestOperatorHandlers:
             spec=statefulset["spec"],
         )
 
-        # Should look for secret without the prefix
-        mock_core.read_namespaced_secret.assert_called_once_with(name="vc-my-cluster", namespace="vcluster-test")
+        # vcluster names its secret and Service after the release, prefix included
+        mock_core.read_namespaced_secret.assert_called_once_with(
+            name="vc-vcluster-my-cluster", namespace="vcluster-test"
+        )
 
-        # ArgoCD secret should be created with correct name
         call_args = mock_core.create_namespaced_secret.call_args
         secret_body = call_args[0][1]
-        assert secret_body["metadata"]["name"] == "vcluster-my-cluster"
+        assert secret_body["metadata"]["name"] == "vcluster-vcluster-my-cluster"
+        server = base64.b64decode(secret_body["data"]["server"]).decode("utf-8")
+        assert server == "https://vcluster-my-cluster.vcluster-test.svc.cluster.local"
 
     def test_missing_vcluster_secret_temporary_error(self, k8s_mocked):
         """Test that missing vcluster secret causes temporary retry."""
@@ -339,19 +342,12 @@ class TestOperatorHandlers:
 class TestUtilityFunctions:
     """Test utility functions."""
 
-    def test_vc_name_without_prefix(self):
-        """Test vcluster name extraction without prefix."""
+    def test_vc_name_is_statefulset_name(self):
+        """The vcluster name is the StatefulSet (Helm release) name, prefix or not."""
         from vcluster_argocd_enroller.operator import vc_name
 
         assert vc_name("my-cluster") == "my-cluster"
-        assert vc_name("test-123") == "test-123"
-
-    def test_vc_name_with_prefix(self):
-        """Test vcluster name extraction with vcluster- prefix."""
-        from vcluster_argocd_enroller.operator import vc_name
-
-        assert vc_name("vcluster-my-cluster") == "my-cluster"
-        assert vc_name("vcluster-test-123") == "test-123"
+        assert vc_name("vcluster-my-cluster") == "vcluster-my-cluster"
 
     def test_ar_secret_name(self):
         """Test ArgoCD secret name generation."""

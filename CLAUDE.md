@@ -36,10 +36,10 @@ Pre-commit runs ruff (lint + format), mypy, and hadolint. Config: `line-length=1
 ## Architecture
 
 - **`src/vcluster_argocd_enroller/operator.py`** — Core logic. Kopf handlers (`@kopf.on.create`, `@kopf.on.resume`, `@kopf.on.update`, `@kopf.on.delete`) on StatefulSets with `app=vcluster` label. Uses lazy K8s client init via `_ensure_k8s()` (safe to import without a kubeconfig). `ARGOCD_NAMESPACE` read from env var (default `"argocd"`). Create-or-update is idempotent (catches 409 Conflict, falls back to `replace_namespaced_secret`).
-- **`src/vcluster_argocd_enroller/cli.py`** — Cyclopts CLI. `run` (default) launches kopf with `--liveness=http://0.0.0.0:8080/healthz` and `--all-namespaces`. Also: `check`, `enroll`, `unenroll` subcommands.
+- **`src/vcluster_argocd_enroller/cli.py`** — Cyclopts CLI. `run` (default) calls `kopf.configure()` + `kopf.run()` on a uvloop loop (liveness on `http://0.0.0.0:8080/healthz`, cluster-wide unless `--namespace`); log level comes from `--log-level` / `LOG_LEVEL`. Also: `check`, `enroll`, `unenroll` subcommands, which share `ARGOCD_NAMESPACE` and `build_argocd_secret` with the operator.
 - **`src/vcluster_argocd_enroller/__init__.py`** — Exports `__version__` only. No eager imports.
 - **`helm/vcluster-argocd-enroller/`** — Helm chart. Deploys as a Deployment with ClusterRole for secrets + statefulsets RBAC. Probes hit kopf's `/healthz` on port 8080.
-- **Tests** — `test_operator_integration.py` uses lazy-init fixtures that pre-set `_k8s_configured`/`_core_v1_api`/`_apps_v1_api` globals. `test_e2e.py` needs a live cluster.
+- **Tests** — `test_cli.py` mocks `kopf.run` and `CoreV1Api`. `test_operator_integration.py` uses lazy-init fixtures that pre-set `_k8s_configured`/`_core_v1_api`/`_apps_v1_api` globals. `test_e2e.py` needs a live cluster.
 
 ## CI/CD (GitHub Actions)
 

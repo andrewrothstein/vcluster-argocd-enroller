@@ -16,7 +16,7 @@ To view operator logs:
   kubectl logs -l app.kubernetes.io/name={{ include "vcluster-argocd-enroller.name" . }},app.kubernetes.io/instance={{ .Release.Name }} -n {{ include "vcluster-argocd-enroller.vclusterNamespace" . }}
 
 The operator will:
-1. Watch for vCluster StatefulSets in the configured namespace
+1. Watch for vCluster StatefulSets in all namespaces
 2. Extract kubeconfig from vCluster secrets
 3. Create corresponding cluster secrets in ArgoCD
 4. Clean up ArgoCD secrets when vClusters are deleted

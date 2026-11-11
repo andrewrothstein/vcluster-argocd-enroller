@@ -1,12 +1,12 @@
 """CLI for vCluster ArgoCD Enroller operator."""
 
+import asyncio
 import logging
 import sys
-from typing import Literal, Optional
+from typing import Annotated, Literal, Optional
 
 import cyclopts
 from rich.console import Console
-from rich.logging import RichHandler
 
 from . import __version__
 
@@ -18,31 +18,15 @@ app = cyclopts.App(
 )
 
 
-def setup_logging(level: str = "INFO", rich: bool = True) -> None:
-    """Configure logging with optional rich output."""
-    log_level = getattr(logging, level.upper())
-
-    if rich:
-        logging.basicConfig(
-            level=log_level,
-            format="%(message)s",
-            datefmt="[%X]",
-            handlers=[RichHandler(console=console, rich_tracebacks=True)],
-        )
-    else:
-        logging.basicConfig(
-            level=log_level,
-            format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        )
-
-
 @app.default
 def run(
     *,
     namespace: Optional[str] = None,
     dev: bool = False,
     verbose: bool = False,
-    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO",
+    log_level: Annotated[
+        Literal["DEBUG", "INFO", "WARNING", "ERROR"], cyclopts.Parameter(env_var="LOG_LEVEL")
+    ] = "INFO",
     standalone: bool = False,
     priority: int = 0,
     peering_name: Optional[str] = None,
@@ -55,11 +39,11 @@ def run(
     namespace : str, optional
         Namespace to watch for vClusters (default: all namespaces)
     dev : bool
-        Run in development mode with auto-reload
+        Run in development mode (kopf --dev: take priority over other running instances)
     verbose : bool
         Enable verbose output (sets log level to DEBUG)
     log_level : str
-        Logging level (DEBUG, INFO, WARNING, ERROR)
+        Logging level (DEBUG, INFO, WARNING, ERROR); defaults to $LOG_LEVEL
     standalone : bool
         Run in standalone mode (no peering)
     priority : int
@@ -69,54 +53,39 @@ def run(
     clusterwide : bool
         Watch cluster-wide (default: True)
     """
+    import kopf
+    import uvloop
+
     if verbose:
         log_level = "DEBUG"
 
-    setup_logging(log_level)
+    # kopf owns the root handler, so every record is emitted once and in one format.
+    kopf.configure(verbose=log_level == "DEBUG", quiet=log_level in ("WARNING", "ERROR"))
+    logging.getLogger().setLevel(log_level)
 
     console.print(f"[bold green]vCluster ArgoCD Enroller v{__version__}[/bold green]")
     console.print(f"[dim]Running in {'development' if dev else 'production'} mode[/dim]")
 
     if namespace:
         console.print(f"[yellow]Watching namespace:[/yellow] {namespace}")
-        clusterwide = False
     else:
         console.print("[yellow]Watching:[/yellow] all namespaces")
 
     # Import operator module to register handlers
     from . import operator  # noqa: F401
 
-    # Build kopf args
-    kopf_args = ["--liveness=http://0.0.0.0:8080/healthz"]
-
-    if namespace and not clusterwide:
-        kopf_args.extend(["--namespace", namespace])
-
-    if dev:
-        kopf_args.append("--dev")
-
-    if verbose:
-        kopf_args.append("--verbose")
-
-    if standalone:
-        kopf_args.append("--standalone")
-
-    if priority:
-        kopf_args.extend(["--priority", str(priority)])
-
-    if peering_name:
-        kopf_args.extend(["--peering", peering_name])
-
-    # Run kopf
-    import kopf.cli
-
-    sys.argv = ["kopf", "run", "-m", "vcluster_argocd_enroller.operator"] + kopf_args
-
-    if clusterwide:
-        sys.argv.append("--all-namespaces")
-
     console.print("[green]Starting operator...[/green]")
-    sys.exit(kopf.cli.main())
+    # Same loop setup as `kopf run`: kopf only picks uvloop by itself when launched from its own CLI.
+    with asyncio.Runner(loop_factory=uvloop.new_event_loop) as runner:
+        kopf.run(
+            loop=runner.get_loop(),
+            standalone=standalone or None,
+            priority=666 if dev else priority or None,
+            peering_name=peering_name,
+            liveness_endpoint="http://0.0.0.0:8080/healthz",
+            clusterwide=clusterwide and not namespace,
+            namespaces=[namespace] if namespace else [],
+        )
 
 
 @app.command
@@ -137,7 +106,7 @@ def check(
     from kubernetes import client, config
     from rich.table import Table
 
-    from .operator import ar_secret_name, vc_name
+    from .operator import ARGOCD_NAMESPACE, ar_secret_name, vc_name
 
     try:
         config.load_incluster_config()
@@ -188,7 +157,7 @@ def check(
         # Check for ArgoCD secret
         argocd_secret_name = ar_secret_name(vcluster_name)
         try:
-            v1.read_namespaced_secret(name=argocd_secret_name, namespace="argocd")
+            v1.read_namespaced_secret(name=argocd_secret_name, namespace=ARGOCD_NAMESPACE)
             argocd_secret_status = "Y"
         except client.exceptions.ApiException:
             argocd_secret_status = "N"
@@ -229,12 +198,11 @@ def enroll(
     force : bool
         Force re-enrollment even if already exists
     """
-    import json
     from typing import cast
 
     from kubernetes import client, config
 
-    from .operator import encode
+    from .operator import ARGOCD_NAMESPACE, ar_secret_name, build_argocd_secret
 
     try:
         config.load_incluster_config()
@@ -244,16 +212,18 @@ def enroll(
     v1 = client.CoreV1Api()
 
     # Check for existing ArgoCD secret
-    argocd_secret_name = f"vcluster-{vcluster_name}"
+    argocd_secret_name = ar_secret_name(vcluster_name)
 
     if not force:
         try:
-            v1.read_namespaced_secret(name=argocd_secret_name, namespace="argocd")
+            v1.read_namespaced_secret(name=argocd_secret_name, namespace=ARGOCD_NAMESPACE)
             console.print(f"[yellow]vCluster {vcluster_name} already enrolled in ArgoCD[/yellow]")
             console.print("[dim]Use --force to re-enroll[/dim]")
             return
-        except client.exceptions.ApiException:
-            pass
+        except client.exceptions.ApiException as e:
+            if e.status != 404:
+                console.print(f"[red]Failed to check ArgoCD secret {argocd_secret_name}: {e}[/red]")
+                sys.exit(1)
 
     # Read vCluster secret
     vc_secret_name = f"vc-{vcluster_name}"
@@ -263,43 +233,21 @@ def enroll(
         console.print(f"[red]Failed to read vCluster secret {vc_secret_name}: {e}[/red]")
         sys.exit(1)
 
-    vc_data = vc_secret.data or {}
-    argocd_secret = {
-        "apiVersion": "v1",
-        "kind": "Secret",
-        "metadata": {
-            "name": argocd_secret_name,
-            "namespace": "argocd",
-            "labels": {"argocd.argoproj.io/secret-type": "cluster", "vcluster-operator": "true"},
-        },
-        "data": {
-            "name": encode(vcluster_name),
-            "server": encode(f"https://{vcluster_name}.{namespace}.svc.cluster.local"),
-            "config": encode(
-                json.dumps(
-                    {
-                        "tlsClientConfig": {
-                            "caData": vc_data["certificate-authority"],
-                            "certData": vc_data["client-certificate"],
-                            "keyData": vc_data["client-key"],
-                            "insecure": False,
-                        }
-                    }
-                )
-            ),
-        },
-    }
-
-    # Create or replace the secret
-    if force:
-        try:
-            v1.delete_namespaced_secret(name=argocd_secret_name, namespace="argocd")
-            console.print("[yellow]Deleted existing ArgoCD secret[/yellow]")
-        except client.exceptions.ApiException:
-            pass
-
     try:
-        v1.create_namespaced_secret(namespace="argocd", body=cast(client.V1Secret, argocd_secret))
+        argocd_secret = cast(client.V1Secret, build_argocd_secret(vcluster_name, namespace, vc_secret))
+    except KeyError as e:
+        console.print(f"[red]vCluster secret {vc_secret_name} has no {e} entry[/red]")
+        sys.exit(1)
+
+    # Create the secret, replacing an existing one in place when forced
+    try:
+        try:
+            v1.create_namespaced_secret(namespace=ARGOCD_NAMESPACE, body=argocd_secret)
+        except client.exceptions.ApiException as e:
+            if not (force and e.status == 409):
+                raise
+            v1.replace_namespaced_secret(name=argocd_secret_name, namespace=ARGOCD_NAMESPACE, body=argocd_secret)
+            console.print("[yellow]Replaced existing ArgoCD secret[/yellow]")
         console.print(f"[green]Successfully enrolled vCluster {vcluster_name} in ArgoCD[/green]")
     except client.exceptions.ApiException as e:
         console.print(f"[red]Failed to create ArgoCD secret: {e}[/red]")
@@ -323,6 +271,8 @@ def unenroll(
     """
     from kubernetes import client, config
 
+    from .operator import ARGOCD_NAMESPACE, ar_secret_name
+
     if not confirm:
         response = console.input(f"[yellow]Remove {vcluster_name} from ArgoCD? [y/N]:[/yellow] ")
         if response.lower() != "y":
@@ -335,10 +285,10 @@ def unenroll(
         config.load_kube_config()
 
     v1 = client.CoreV1Api()
-    argocd_secret_name = f"vcluster-{vcluster_name}"
+    argocd_secret_name = ar_secret_name(vcluster_name)
 
     try:
-        v1.delete_namespaced_secret(name=argocd_secret_name, namespace="argocd")
+        v1.delete_namespaced_secret(name=argocd_secret_name, namespace=ARGOCD_NAMESPACE)
         console.print(f"[green]Successfully removed vCluster {vcluster_name} from ArgoCD[/green]")
     except client.exceptions.ApiException as e:
         if e.status == 404:

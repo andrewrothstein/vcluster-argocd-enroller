@@ -23,7 +23,6 @@ classifiers = [
 ]
 dependencies = [
     "kubernetes>=35.0.0",
-    "pyyaml>=6.0.3",
     "kopf[uvloop]>=1.44.5",
     "cyclopts>=4.10.2",
     "rich>=15.0.0"
@@ -32,7 +31,6 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=9.0.0",
-    "pytest-asyncio>=1.3.0",
     "pytest-cov>=7.1.0",
     "ruff>=0.15.10",
     "build>=1.4.3",
@@ -48,7 +46,6 @@ packages = ["src/vcluster_argocd_enroller"]
 [dependency-groups]
 dev = [
     "mypy>=1.20.1",
-    "types-pyyaml>=6.0.12.20260408",
 ]
 
 [tool.ruff]
