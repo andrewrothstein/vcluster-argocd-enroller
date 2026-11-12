@@ -112,7 +112,7 @@ tasks:
         --set replicaCount=2 --set leaderElection.enabled=true --set operator.resyncInterval=15
 
   k3d-smoke:
-    desc: "Verify the operator is Ready under its NetworkPolicy with one active replica, then enroll fake vClusters and check the ArgoCD secrets through create, migration, re-sync, a change of workload kind and delete"
+    desc: "Verify the operator is Ready under its NetworkPolicy with one active replica, then enroll fake vClusters and check the ArgoCD secrets through create, migration, re-sync, labels and project, opt-out, a change of workload kind and delete"
     cmds:
       - kubectl -n vcluster-system get networkpolicy test-release-vcluster-argocd-enroller
       - kubectl -n vcluster-system wait --for=condition=Ready pod -l app.kubernetes.io/name=vcluster-argocd-enroller --timeout=120s
@@ -127,6 +127,23 @@ tasks:
       - kubectl -n argocd wait --for=delete secret/vcluster-smoke --timeout=60s
       # A removed enrollment comes back with the next re-sync
       - kubectl -n argocd delete secret vcluster-team-b-smoke
+      - kubectl -n argocd wait --for=create secret/vcluster-team-b-smoke --timeout=60s
+      # The labels and project a vCluster asks for with annotations reach its ArgoCD secret
+      - kubectl -n team-b annotate statefulset smoke vcluster-argocd-enroller/labels=env=dev,tier=gold vcluster-argocd-enroller/project=team-b
+      - kubectl -n argocd wait --for=jsonpath='{.metadata.labels.tier}'=gold secret/vcluster-team-b-smoke --timeout=60s
+      - kubectl -n argocd get secret vcluster-team-b-smoke -o jsonpath='{.metadata.labels.env}' | grep -qx dev
+      - kubectl -n argocd get secret vcluster-team-b-smoke -o jsonpath='{.data.project}' | base64 -d | grep -qx team-b
+      # A label that is no longer asked for leaves the secret; one added by something else stays
+      - kubectl -n argocd label secret vcluster-team-b-smoke added-by=someone-else
+      - kubectl -n team-b annotate statefulset smoke --overwrite vcluster-argocd-enroller/labels=env=dev
+      - kubectl -n argocd wait --for=jsonpath='{.metadata.annotations.vcluster-argocd-enroller/copied-labels}'=env secret/vcluster-team-b-smoke --timeout=60s
+      - kubectl -n argocd get secret vcluster-team-b-smoke -o jsonpath='{.metadata.labels.tier}' | grep -c . | grep -qx 0
+      - kubectl -n argocd get secret vcluster-team-b-smoke -o jsonpath='{.metadata.labels.added-by}' | grep -qx someone-else
+      # A vCluster that opts out is unenrolled and stays out across re-syncs, until it opts back in
+      - kubectl -n team-b annotate statefulset smoke vcluster-argocd-enroller/enroll=false
+      - kubectl -n argocd wait --for=delete secret/vcluster-team-b-smoke --timeout=60s
+      - "! kubectl -n argocd wait --for=create secret/vcluster-team-b-smoke --timeout=30s"
+      - kubectl -n team-b annotate statefulset smoke vcluster-argocd-enroller/enroll-
       - kubectl -n argocd wait --for=create secret/vcluster-team-b-smoke --timeout=60s
       # Deleting one vCluster leaves its namesake enrolled
       - kubectl -n vcluster-system delete statefulset smoke --wait=false
@@ -177,6 +194,40 @@ tasks:
       - helm uninstall vcluster-demo --namespace {{ .NAMESPACE }} --wait --timeout 3m
       - kubectl -n argocd wait --for=delete secret/vcluster-{{ .NAMESPACE }}-vcluster-demo --timeout=120s
 
+  k3d-fleet:
+    desc: "Install ArgoCD and run examples/fleet: vClusters created by one ApplicationSet are enrolled with their labels, deployed into by the other, and removed again"
+    vars:
+      ARGOCD_VERSION: '{{ .ARGOCD_VERSION | default "v3.6.1" }}'
+    cmds:
+      # The example's namespaces may be left over, or still terminating, from an earlier task
+      - kubectl delete namespace team-a team-b --ignore-not-found --timeout=3m
+      - >-
+        kubectl apply -n argocd --server-side --force-conflicts
+        -f https://raw.githubusercontent.com/argoproj/argo-cd/{{ .ARGOCD_VERSION }}/manifests/install.yaml
+      - kubectl -n argocd wait --for=condition=Available deployment --all --timeout=5m
+      - kubectl -n argocd rollout status statefulset/argocd-application-controller --timeout=5m
+      - defer: kubectl delete namespace team-a team-b --ignore-not-found --wait=false
+      - defer: kubectl delete -f examples/fleet/ --ignore-not-found --wait=false
+      - kubectl apply -f examples/fleet/
+      # Each vCluster is enrolled with the label it asked for
+      - kubectl -n argocd wait --for=create secret/vcluster-team-a-alpha --timeout=5m
+      - kubectl -n argocd wait --for=create secret/vcluster-team-b-beta --timeout=5m
+      - kubectl -n argocd get secret vcluster-team-a-alpha -o jsonpath='{.metadata.labels.env}' | grep -qx dev
+      - kubectl -n argocd get secret vcluster-team-b-beta -o jsonpath='{.metadata.labels.env}' | grep -qx prod
+      # ...which gets it an Application that ArgoCD deploys into it
+      - kubectl -n argocd wait --for=create application/bootstrap-team-a-alpha --timeout=2m
+      - kubectl -n argocd wait --for=create application/bootstrap-team-b-beta --timeout=2m
+      - kubectl -n argocd get application bootstrap-team-b-beta -o jsonpath='{.metadata.labels.env}' | grep -qx prod
+      - >-
+        kubectl -n argocd wait --for=jsonpath='{.status.health.status}'=Healthy
+        application/bootstrap-team-a-alpha application/bootstrap-team-b-beta --timeout=5m
+      # The operator's finalizer and annotations on the StatefulSets do not put the vClusters out of sync
+      - kubectl -n argocd wait --for=jsonpath='{.status.sync.status}'=Synced application --all --timeout=2m
+      # Removing the vClusters removes their enrollments, and with those the Applications deployed into them
+      - kubectl delete -f examples/fleet/vclusters.yaml
+      - kubectl -n argocd wait --for=delete secret/vcluster-team-a-alpha secret/vcluster-team-b-beta --timeout=3m
+      - kubectl -n argocd wait --for=delete application/bootstrap-team-a-alpha application/bootstrap-team-b-beta --timeout=2m
+
   k3d-down:
     desc: "Delete the k3d test cluster"
     vars:
@@ -185,12 +236,13 @@ tasks:
       - k3d cluster delete {{ .CLUSTER }}
 
   k3d-test:
-    desc: "Full local k3d integration test (cluster up, smoke test, real vcluster, cluster down)"
+    desc: "Full local k3d integration test (cluster up, smoke test, real vcluster, fleet example, cluster down)"
     cmds:
       - task: k3d-up
       - defer: { task: k3d-down }
       - task: k3d-smoke
       - task: k3d-vcluster
+      - task: k3d-fleet
 
   act-integration:
     desc: "Run the CI integration-test job locally with act (mounts k3d/kubectl, since the act image lacks them)"

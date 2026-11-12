@@ -76,12 +76,53 @@ helm install vcluster-argocd-enroller \
 
 See the [Helm chart README](helm/vcluster-argocd-enroller/README.md) for the full list of configurable parameters, HA setup, and network policies.
 
+## Per-vCluster Settings
+
+Annotations on a vCluster's StatefulSet or Deployment shape its enrollment:
+
+| Annotation | Effect |
+| ---------- | ------ |
+| `vcluster-argocd-enroller/labels` | Labels for the ArgoCD cluster secret, as `key=value,key=value`. ApplicationSet cluster generators can select on them and template with them |
+| `vcluster-argocd-enroller/project` | The ArgoCD project the cluster is scoped to: the `project` field of the cluster secret, which makes it a [project-scoped cluster](https://argo-cd.readthedocs.io/en/stable/user-guide/projects/#project-scoped-repositories-and-clusters) |
+| `vcluster-argocd-enroller/enroll` | `"false"` keeps the vCluster out of ArgoCD |
+
+Set them where the vCluster is defined, in the vcluster chart's values:
+
+```yaml
+controlPlane:
+  statefulSet:
+    annotations:
+      vcluster-argocd-enroller/labels: env=dev,team=payments
+      vcluster-argocd-enroller/project: payments
+```
+
+or on a running vCluster with `kubectl annotate`. Either way the change reaches ArgoCD right away.
+
+- Labels and a project that are no longer asked for are removed again. Labels and annotations that something else
+  put on the cluster secret are kept
+- A label that is not a valid Kubernetes label, or is one of the operator's own (`argocd.argoproj.io/secret-type`,
+  `vcluster-operator`, `vcluster-argocd-enroller/namespace`, `vcluster-argocd-enroller/name`), is skipped and
+  reported in the logs; the vCluster is enrolled without it
+- Opting out removes the enrollment the operator made, and holds until the annotation is removed or set to
+  `"true"`. `check` marks such a vCluster `(opted out)`
+- Whoever can edit a vCluster's workload can set these. Treat the labels as the vCluster's own claim about itself
+  when an ApplicationSet selects on them
+
+## Managing a Fleet
+
+The operator enrolls vClusters; creating them is left to whatever you already deploy with.
+[examples/fleet](examples/fleet/) shows the whole loop with ArgoCD itself: one ApplicationSet creates the vClusters
+from a list, the operator enrolls each with its labels, and a second ApplicationSet deploys into every vCluster
+that shows up.
+
 ## CLI
 
 The operator also provides CLI subcommands for manual management:
 
 - **`check`** -- Show vCluster enrollment status across namespaces
-- **`enroll <name> <namespace>`** -- Manually enroll a vCluster in ArgoCD
+- **`enroll <name> <namespace> [--label key=value]... [--project name]`** -- Manually enroll a vCluster in ArgoCD.
+  A running operator re-syncs the enrollment from the vCluster's annotations, so set labels and the project there
+  when the operator is in charge
 - **`unenroll <name> <namespace> --confirm`** -- Remove a vCluster from ArgoCD (a running operator enrolls it again
   on its next re-sync, for as long as the vCluster exists)
 - **`verify <name> <namespace>`** -- Connect to the vCluster with the credentials enrolled in ArgoCD. Run it inside
@@ -142,5 +183,6 @@ helm upgrade vcluster-argocd-enroller \
 ## Links
 
 - [BUILDING.md](BUILDING.md) -- Developer guide (building, testing, project structure)
+- [examples/fleet](examples/fleet/) -- A vCluster fleet created, enrolled and bootstrapped with ArgoCD ApplicationSets
 - [Helm Chart README](helm/vcluster-argocd-enroller/README.md) -- Full chart configuration reference
 - [Issues](https://github.com/andrewrothstein/vcluster-argocd-enroller/issues) -- Bug reports and feature requests

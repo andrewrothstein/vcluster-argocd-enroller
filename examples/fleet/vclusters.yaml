@@ -1,0 +1,49 @@
+# One ArgoCD Application per vCluster, each installing the vcluster chart into the host cluster.
+# Add or remove an element to create or delete a vCluster. vcluster supports one vCluster per namespace.
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: vclusters
+  namespace: argocd
+spec:
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
+  generators:
+    - list:
+        elements:
+          - name: alpha
+            namespace: team-a
+            env: dev
+          - name: beta
+            namespace: team-b
+            env: prod
+  template:
+    metadata:
+      name: 'vcluster-{{.namespace}}-{{.name}}'
+      # Deleting the Application deletes the vCluster, which the enroller then removes from ArgoCD
+      finalizers:
+        - resources-finalizer.argocd.argoproj.io
+    spec:
+      project: default
+      source:
+        repoURL: https://charts.loft.sh
+        chart: vcluster
+        targetRevision: 0.37.7
+        helm:
+          # The release name is the vCluster's name: ArgoCD will know it as {namespace}-{name}
+          releaseName: '{{.name}}'
+          valuesObject:
+            controlPlane:
+              statefulSet:
+                # Read by the enroller: these become labels on the vCluster's ArgoCD cluster secret
+                annotations:
+                  vcluster-argocd-enroller/labels: 'env={{.env}}'
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: '{{.namespace}}'
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true

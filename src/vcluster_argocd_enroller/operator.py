@@ -2,6 +2,8 @@ import base64
 import json
 import logging
 import os
+import re
+from collections.abc import Mapping
 from typing import cast
 
 import kopf
@@ -29,6 +31,22 @@ WORKLOAD_KINDS = {"statefulsets": "StatefulSet", "deployments": "Deployment"}
 OPERATOR_LABEL = "vcluster-operator"
 NAMESPACE_LABEL = "vcluster-argocd-enroller/namespace"
 NAME_LABEL = "vcluster-argocd-enroller/name"
+# The labels every enrollment carries. A vCluster cannot ask for its own value of these.
+RESERVED_LABELS = frozenset({"argocd.argoproj.io/secret-type", OPERATOR_LABEL, NAMESPACE_LABEL, NAME_LABEL})
+
+# Annotations on a vCluster's workload that say how it is enrolled.
+# "false" keeps the vCluster out of ArgoCD.
+ENROLL_ANNOTATION = "vcluster-argocd-enroller/enroll"
+# "key=value,key=value": labels for the ArgoCD secret, which ApplicationSet cluster generators select on.
+LABELS_ANNOTATION = "vcluster-argocd-enroller/labels"
+# The ArgoCD project the cluster is scoped to (the secret's `project` field).
+PROJECT_ANNOTATION = "vcluster-argocd-enroller/project"
+# On the ArgoCD secret: the keys of the labels copied from the workload, so that a dropped one can be removed.
+COPIED_LABELS_ANNOTATION = "vcluster-argocd-enroller/copied-labels"
+
+# What Kubernetes accepts as a label key's prefix, and as its name or a label value.
+_DNS_SUBDOMAIN = re.compile(r"[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*")
+_LABEL_NAME = re.compile(r"[A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?")
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +116,43 @@ def encode(s: str) -> str:
     return base64.b64encode(s.encode("utf-8")).decode("utf-8")
 
 
+def parse_label(entry: str) -> tuple[str, str]:
+    """Split a `key=value` label, raising ValueError unless it is one the ArgoCD secret can carry."""
+    key, equals, value = (part.strip() for part in entry.partition("="))
+    if not equals:
+        raise ValueError(f"{entry.strip()!r} is not key=value")
+    prefix, slash, name = key.rpartition("/")
+    valid_prefix = not slash or (len(prefix) <= 253 and _DNS_SUBDOMAIN.fullmatch(prefix))
+    if not (valid_prefix and _LABEL_NAME.fullmatch(name)):
+        raise ValueError(f"{key!r} is not a valid label key")
+    if value and not _LABEL_NAME.fullmatch(value):
+        raise ValueError(f"{value!r} is not a valid label value")
+    if key in RESERVED_LABELS:
+        raise ValueError(f"{key!r} is set by the operator")
+    return key, value
+
+
+def opted_out(annotations: Mapping[str, str]) -> bool:
+    """Tell whether a vCluster's workload asks to be kept out of ArgoCD."""
+    return annotations.get(ENROLL_ANNOTATION, "").strip().lower() == "false"
+
+
+def wanted_labels(annotations: Mapping[str, str], vcluster: str) -> dict[str, str]:
+    """Return the labels a vCluster's workload asks for on its ArgoCD secret.
+
+    An entry that cannot be a label is left out and reported: the vCluster is still enrolled without it.
+    """
+    labels = {}
+    for entry in filter(str.strip, annotations.get(LABELS_ANNOTATION, "").split(",")):
+        try:
+            key, value = parse_label(entry)
+        except ValueError as e:
+            logger.warning(f"Ignoring a label asked for by {vcluster} in {LABELS_ANNOTATION}: {e}")
+        else:
+            labels[key] = value
+    return labels
+
+
 def owns(secret: client.V1Secret, namespace: str, vcluster_name: str) -> bool:
     """Tell whether an ArgoCD cluster secret is this operator's enrollment of the given vCluster.
 
@@ -111,10 +166,20 @@ def owns(secret: client.V1Secret, namespace: str, vcluster_name: str) -> bool:
     return (secret.data or {}).get("server") == encode(server_url(namespace, vcluster_name, LEGACY_SERVER_URL))
 
 
-def build_argocd_secret(vcluster_name: str, namespace: str, vc_secret: client.V1Secret) -> dict:
-    """Build the ArgoCD cluster secret body."""
+def build_argocd_secret(
+    vcluster_name: str,
+    namespace: str,
+    vc_secret: client.V1Secret,
+    labels: Mapping[str, str] | None = None,
+    project: str | None = None,
+) -> dict:
+    """Build the ArgoCD cluster secret body.
+
+    `labels` are added to the operator's own, and `project` scopes the cluster to an ArgoCD project.
+    """
     argocd_secret_name = ar_secret_name(namespace, vcluster_name)
     vc_data = vc_secret.data or {}
+    copied = {key: value for key, value in (labels or {}).items() if key not in RESERVED_LABELS}
     return {
         "apiVersion": "v1",
         "kind": "Secret",
@@ -122,13 +187,16 @@ def build_argocd_secret(vcluster_name: str, namespace: str, vc_secret: client.V1
             "name": argocd_secret_name,
             "namespace": ARGOCD_NAMESPACE,
             "labels": {
+                **copied,
                 "argocd.argoproj.io/secret-type": "cluster",
                 OPERATOR_LABEL: "true",
                 NAMESPACE_LABEL: namespace,
                 NAME_LABEL: vcluster_name,
             },
+            **({"annotations": {COPIED_LABELS_ANNOTATION: ",".join(sorted(copied))}} if copied else {}),
         },
         "data": {
+            **({"project": encode(project)} if project else {}),
             "name": encode(argocd_cluster_name(namespace, vcluster_name)),
             "server": encode(server_url(namespace, vcluster_name)),
             "config": encode(
@@ -157,10 +225,30 @@ def _read_argocd_secret(core_v1_api: client.CoreV1Api, name: str) -> client.V1Se
         raise
 
 
+def _keeping_foreign_metadata(existing: client.V1Secret, desired: dict) -> dict:
+    """Return the desired ArgoCD secret with the labels and annotations something else put on the existing one.
+
+    ArgoCD labels cluster secrets itself when asked to, and so may anyone with kubectl. The labels this
+    operator copied from the workload earlier are not carried over: one that is no longer asked for goes.
+    """
+    meta = existing.metadata
+    labels = dict((meta.labels if meta else None) or {})
+    annotations = dict((meta.annotations if meta else None) or {})
+    for key in filter(None, annotations.pop(COPIED_LABELS_ANNOTATION, "").split(",")):
+        labels.pop(key, None)
+    labels.update(desired["metadata"]["labels"])
+    annotations.update(desired["metadata"].get("annotations", {}))
+    return {**desired, "metadata": {**desired["metadata"], "labels": labels, "annotations": annotations}}
+
+
 def _in_sync(existing: client.V1Secret, desired: dict) -> bool:
-    """Tell whether an ArgoCD secret already carries the desired data and labels."""
-    labels = (existing.metadata.labels if existing.metadata else None) or {}
-    return existing.data == desired["data"] and desired["metadata"]["labels"].items() <= labels.items()
+    """Tell whether an ArgoCD secret already carries the desired data, labels and annotations."""
+    meta = existing.metadata
+    return (
+        existing.data == desired["data"]
+        and ((meta.labels if meta else None) or {}) == desired["metadata"]["labels"]
+        and ((meta.annotations if meta else None) or {}) == desired["metadata"]["annotations"]
+    )
 
 
 def _delete_if_owned(core_v1_api: client.CoreV1Api, name: str, namespace: str, vcluster_name: str) -> bool:
@@ -177,6 +265,13 @@ def _delete_if_owned(core_v1_api: client.CoreV1Api, name: str, namespace: str, v
         if e.status != 404:
             raise
     return True
+
+
+def _remove_enrollment(core_v1_api: client.CoreV1Api, namespace: str, vcluster_name: str) -> None:
+    """Delete the ArgoCD secrets this operator wrote for a vCluster, under the current name and the 1.x one."""
+    for secret_name in (ar_secret_name(namespace, vcluster_name), legacy_ar_secret_name(vcluster_name)):
+        if _delete_if_owned(core_v1_api, secret_name, namespace, vcluster_name):
+            logger.info(f"Deleted ArgoCD cluster secret {secret_name} for {namespace}/{vcluster_name}")
 
 
 def _lives_on(apps_v1_api: client.AppsV1Api, deleted_plural: str, name: str, namespace: str) -> bool:
@@ -201,11 +296,33 @@ def _lives_on(apps_v1_api: client.AppsV1Api, deleted_plural: str, name: str, nam
     return VCLUSTER_LABELS.items() <= (meta.labels or {}).items()
 
 
-def handle_vcluster_enrollment(workload_name: str, namespace: str, **kwargs):
-    """Create or update the ArgoCD cluster secret for a vCluster."""
+def handle_vcluster_enrollment(
+    workload_name: str, namespace: str, annotations: Mapping[str, str] | None = None, **kwargs
+):
+    """Create or update the ArgoCD cluster secret for a vCluster, or remove it when the vCluster opts out.
+
+    `annotations` are those of the vCluster's workload, which say how it wants to be enrolled.
+    """
     core_v1_api, _ = _ensure_k8s()
 
     vcluster_name = vc_name(workload_name)
+    annotations = annotations or {}
+
+    if opted_out(annotations):
+        logger.debug(f"Not enrolling {namespace}/{vcluster_name}: its workload is annotated {ENROLL_ANNOTATION}=false")
+        try:
+            _remove_enrollment(core_v1_api, namespace, vcluster_name)
+        except ApiException as e:
+            logger.error(f"API error removing the enrollment of {namespace}/{vcluster_name}: {e.status} {e.reason}")
+            raise kopf.TemporaryError(
+                f"Failed to remove the enrollment of {namespace}/{vcluster_name}: {e.status} {e.reason}", delay=60
+            )
+        return
+    if annotations.get(ENROLL_ANNOTATION, "true").strip().lower() != "true":
+        logger.warning(
+            f"Enrolling {namespace}/{vcluster_name}: its {ENROLL_ANNOTATION} annotation is neither true nor false"
+        )
+
     vcluster_secret_name = f"vc-{vcluster_name}"
     logger.debug(f"Syncing vcluster {namespace}/{vcluster_name} from secret {vcluster_secret_name}")
 
@@ -221,7 +338,13 @@ def handle_vcluster_enrollment(workload_name: str, namespace: str, **kwargs):
         )
 
     try:
-        secret_body = build_argocd_secret(vcluster_name, namespace, vc_secret)
+        secret_body = build_argocd_secret(
+            vcluster_name,
+            namespace,
+            vc_secret,
+            labels=wanted_labels(annotations, f"{namespace}/{vcluster_name}"),
+            project=annotations.get(PROJECT_ANNOTATION, "").strip() or None,
+        )
     except KeyError as e:
         # Retried rather than given up on: the secret can be completed (or fixed) later.
         logger.warning(f"vcluster secret {namespace}/{vcluster_secret_name} has no {e} entry")
@@ -241,7 +364,7 @@ def handle_vcluster_enrollment(workload_name: str, namespace: str, **kwargs):
             raise kopf.TemporaryError(
                 f"ArgoCD secret {argocd_secret_name} belongs to something else; not overwriting it", delay=60
             )
-        elif _in_sync(existing, secret_body):
+        elif _in_sync(existing, secret_body := _keeping_foreign_metadata(existing, secret_body)):
             logger.debug(f"ArgoCD cluster secret {argocd_secret_name} is up to date")
         else:
             core_v1_api.replace_namespaced_secret(
@@ -322,9 +445,7 @@ def vcluster_deleted(name, namespace, resource, **kwargs):
         if _lives_on(apps_v1_api, resource.plural, name, namespace):
             logger.info(f"Keeping the enrollment of {namespace}/{vcluster_name}: only its {kind} is replaced")
             return
-        for secret_name in (ar_secret_name(namespace, vcluster_name), legacy_ar_secret_name(vcluster_name)):
-            if _delete_if_owned(core_v1_api, secret_name, namespace, vcluster_name):
-                logger.info(f"Deleted ArgoCD cluster secret {secret_name} for {namespace}/{vcluster_name}")
+        _remove_enrollment(core_v1_api, namespace, vcluster_name)
     except ApiException as e:
         logger.error(f"Failed to delete ArgoCD cluster secret for {namespace}/{vcluster_name}: {e.status} {e.reason}")
         # Never a PermanentError here. kopf retries DELETE_RETRIES times, then releases the finalizer anyway.
