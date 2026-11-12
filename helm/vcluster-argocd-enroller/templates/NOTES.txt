@@ -18,7 +18,7 @@ To view operator logs:
   kubectl logs -l app.kubernetes.io/name={{ include "vcluster-argocd-enroller.name" . }},app.kubernetes.io/instance={{ .Release.Name }} -n {{ include "vcluster-argocd-enroller.vclusterNamespace" . }}
 
 The operator will:
-1. Watch for vCluster StatefulSets in all namespaces
+1. Watch for vClusters (StatefulSets and Deployments labelled app=vcluster) in all namespaces
 2. Extract the credentials from each vCluster's vc-<name> secret
 3. Enroll it in ArgoCD as cluster <namespace>-<name> (secret vcluster-<namespace>-<name>)
 4. Keep that secret in sync, and remove it when the vCluster is deleted

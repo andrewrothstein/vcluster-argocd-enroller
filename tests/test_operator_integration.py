@@ -4,6 +4,7 @@ Integration tests for vCluster ArgoCD Enroller operator.
 """
 
 import base64
+from datetime import UTC, datetime
 from unittest.mock import Mock
 
 import kopf
@@ -33,6 +34,9 @@ def k8s_mocked():
 
     mock_core = Mock()
     mock_apps = Mock()
+    # No vCluster has a second workload unless a test says so
+    mock_apps.read_namespaced_deployment.side_effect = ApiException(status=404)
+    mock_apps.read_namespaced_stateful_set.side_effect = ApiException(status=404)
 
     # Pre-set the lazy-init globals so _ensure_k8s() returns our mocks
     op._k8s_configured = True
@@ -100,10 +104,26 @@ def serve_secrets(mock_core, secrets):
     mock_core.read_namespaced_secret.side_effect = read
 
 
-def handler_args(name="test-cluster", namespace="vcluster-test"):
-    """Build the keyword arguments kopf passes to the StatefulSet handlers."""
-    statefulset = create_vcluster_statefulset(name, namespace)
-    return {"name": name, "namespace": namespace, "meta": statefulset["metadata"], "spec": statefulset["spec"]}
+def handler_args(name="test-cluster", namespace="vcluster-test", plural="statefulsets"):
+    """Build the keyword arguments kopf passes to the handlers of a vCluster's StatefulSet or Deployment."""
+    workload = create_vcluster_statefulset(name, namespace)
+    return {
+        "name": name,
+        "namespace": namespace,
+        "meta": workload["metadata"],
+        "spec": workload["spec"],
+        "resource": Mock(plural=plural),
+    }
+
+
+def workload(labels=None, deleting=False):
+    """Create a StatefulSet or Deployment as the API returns it, as far as the operator looks at it."""
+    return Mock(
+        metadata=client.V1ObjectMeta(
+            labels={"app": "vcluster"} if labels is None else labels,
+            deletion_timestamp=datetime.now(UTC) if deleting else None,
+        )
+    )
 
 
 class TestOperatorHandlers:
@@ -316,7 +336,7 @@ class TestOperatorHandlers:
         mock_core, _ = k8s_mocked
         serve_secrets(mock_core, {("argocd", "vcluster-vcluster-test-test-cluster"): enrolled_secret()})
 
-        result = operator.vcluster_deleted(name="test-cluster", namespace="vcluster-test")
+        result = operator.vcluster_deleted(**handler_args())
 
         mock_core.delete_namespaced_secret.assert_called_once_with(
             name="vcluster-vcluster-test-test-cluster", namespace="argocd"
@@ -329,7 +349,7 @@ class TestOperatorHandlers:
         mock_core, _ = k8s_mocked
         serve_secrets(mock_core, {("argocd", "vcluster-test-cluster"): legacy_secret()})
 
-        operator.vcluster_deleted(name="test-cluster", namespace="vcluster-test")
+        operator.vcluster_deleted(**handler_args())
 
         mock_core.delete_namespaced_secret.assert_called_once_with(name="vcluster-test-cluster", namespace="argocd")
 
@@ -346,8 +366,95 @@ class TestOperatorHandlers:
             },
         )
 
-        operator.vcluster_deleted(name="test-cluster", namespace="vcluster-test")
+        operator.vcluster_deleted(**handler_args())
 
+        mock_core.delete_namespaced_secret.assert_not_called()
+
+    @pytest.mark.parametrize("plural", ["statefulsets", "deployments"])
+    def test_both_workload_kinds_are_enrolled(self, k8s_mocked, plural):
+        """vcluster runs its control plane as a Deployment when it keeps no state of its own."""
+        from vcluster_argocd_enroller import operator
+
+        mock_core, _ = k8s_mocked
+        serve_secrets(mock_core, {("vcluster-test", "vc-test-cluster"): create_vcluster_secret()})
+
+        operator.vcluster_created(**handler_args(plural=plural))
+
+        secret_body = mock_core.create_namespaced_secret.call_args[0][1]
+        assert secret_body["metadata"]["name"] == "vcluster-vcluster-test-test-cluster"
+
+    def test_handlers_watch_statefulsets_and_deployments_of_the_apps_group(self):
+        """Every handler serves both kinds, and neither the StatefulSets nor Deployments of another API group."""
+        from vcluster_argocd_enroller import operator
+
+        registry = kopf.get_default_registry()
+        handlers = [*registry._changing.get_all_handlers(), *registry._spawning.get_all_handlers()]
+        watched: dict[str, set[tuple]] = {}
+        for handler in handlers:
+            assert handler.selector is not None
+            watched.setdefault(handler.id, set()).add((handler.selector.group, handler.selector.any_name))
+            assert handler.labels == operator.VCLUSTER_LABELS
+
+        assert watched == {
+            handler_id: {("apps", "statefulsets"), ("apps", "deployments")}
+            for handler_id in (
+                "vcluster_created",
+                "vcluster_resumed",
+                "vcluster_updated",
+                "vcluster_resync",
+                "vcluster_deleted",
+            )
+        }
+
+    @pytest.mark.parametrize(
+        "plural,read_other",
+        [("statefulsets", "read_namespaced_deployment"), ("deployments", "read_namespaced_stateful_set")],
+    )
+    def test_replaced_workload_keeps_the_enrollment(self, k8s_mocked, plural, read_other):
+        """A vCluster switching between StatefulSet and Deployment is not unenrolled by the old one's deletion."""
+        from vcluster_argocd_enroller import operator
+
+        mock_core, mock_apps = k8s_mocked
+        serve_secrets(mock_core, {("argocd", "vcluster-vcluster-test-test-cluster"): enrolled_secret()})
+        getattr(mock_apps, read_other).side_effect = None
+        getattr(mock_apps, read_other).return_value = workload()
+
+        operator.vcluster_deleted(**handler_args(plural=plural))
+
+        getattr(mock_apps, read_other).assert_called_once_with(name="test-cluster", namespace="vcluster-test")
+        mock_core.delete_namespaced_secret.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "other",
+        [workload(deleting=True), workload(labels={"app": "something-else"}), workload(labels={})],
+        ids=["being-deleted-too", "not-a-vcluster", "unlabelled"],
+    )
+    def test_other_workload_that_is_not_a_live_vcluster_does_not_keep_the_enrollment(self, k8s_mocked, other):
+        from vcluster_argocd_enroller import operator
+
+        mock_core, mock_apps = k8s_mocked
+        serve_secrets(mock_core, {("argocd", "vcluster-vcluster-test-test-cluster"): enrolled_secret()})
+        mock_apps.read_namespaced_deployment.side_effect = None
+        mock_apps.read_namespaced_deployment.return_value = other
+
+        operator.vcluster_deleted(**handler_args())
+
+        mock_core.delete_namespaced_secret.assert_called_once_with(
+            name="vcluster-vcluster-test-test-cluster", namespace="argocd"
+        )
+
+    def test_failed_lookup_of_the_other_workload_is_retried(self, k8s_mocked):
+        """Not knowing whether the vCluster lives on, the enrollment is neither removed nor given up on."""
+        from vcluster_argocd_enroller import operator
+
+        mock_core, mock_apps = k8s_mocked
+        serve_secrets(mock_core, {("argocd", "vcluster-vcluster-test-test-cluster"): enrolled_secret()})
+        mock_apps.read_namespaced_deployment.side_effect = ApiException(status=500)
+
+        with pytest.raises(kopf.TemporaryError) as exc_info:
+            operator.vcluster_deleted(**handler_args())
+
+        assert not isinstance(exc_info.value, kopf.PermanentError)
         mock_core.delete_namespaced_secret.assert_not_called()
 
     def test_vcluster_with_prefix_name(self, k8s_mocked):
@@ -420,7 +527,7 @@ class TestOperatorHandlers:
         mock_core, _ = k8s_mocked
         mock_core.read_namespaced_secret.side_effect = ApiException(status=404)
 
-        result = operator.vcluster_deleted(name="test-cluster", namespace="vcluster-test")
+        result = operator.vcluster_deleted(**handler_args())
 
         mock_core.delete_namespaced_secret.assert_not_called()
         assert result is None
@@ -434,7 +541,7 @@ class TestOperatorHandlers:
         mock_core.delete_namespaced_secret.side_effect = ApiException(status=500)
 
         with pytest.raises(kopf.TemporaryError) as exc_info:
-            operator.vcluster_deleted(name="test-cluster", namespace="vcluster-test")
+            operator.vcluster_deleted(**handler_args())
 
         assert not isinstance(exc_info.value, kopf.PermanentError)
 
@@ -468,7 +575,7 @@ class TestOperatorHandlers:
 class TestUtilityFunctions:
     """Test utility functions."""
 
-    def test_vc_name_is_statefulset_name(self):
+    def test_vc_name_is_workload_name(self):
         """The vcluster name is the StatefulSet (Helm release) name, prefix or not."""
         from vcluster_argocd_enroller.operator import vc_name
 

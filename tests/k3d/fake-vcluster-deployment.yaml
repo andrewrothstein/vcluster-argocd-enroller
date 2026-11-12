@@ -1,0 +1,25 @@
+# The team-b/smoke fake vCluster of fake-vcluster.yaml, as the Deployment vcluster runs when it keeps no
+# state of its own. `task k3d-smoke` applies it while the StatefulSet still exists, then deletes that:
+# what a change of backing store looks like.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: smoke
+  namespace: team-b
+  labels:
+    app: vcluster
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: vcluster
+      release: smoke
+  template:
+    metadata:
+      labels:
+        app: vcluster
+        release: smoke
+    spec:
+      containers:
+        - name: pause
+          image: registry.k8s.io/pause:3.10

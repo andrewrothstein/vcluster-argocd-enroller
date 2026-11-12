@@ -11,12 +11,13 @@ rules:
 - apiGroups: [""]
   resources: ["secrets"]
   verbs: ["get", "list", "watch"]
+# A vCluster's control plane is a StatefulSet, or a Deployment when it keeps no state of its own.
 - apiGroups: ["apps"]
-  resources: ["statefulsets"]
+  resources: ["statefulsets", "deployments"]
   verbs: ["get", "list", "watch", "patch", "update"]
 # kopf records handler results in the object's status; without this it retries and stalls delete handling.
 - apiGroups: ["apps"]
-  resources: ["statefulsets/status"]
+  resources: ["statefulsets/status", "deployments/status"]
   verbs: ["get", "patch", "update"]
 # kopf lists CRDs for resource discovery.
 - apiGroups: ["apiextensions.k8s.io"]

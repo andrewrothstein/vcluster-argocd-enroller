@@ -7,7 +7,9 @@ A Kubernetes operator that automatically enrolls [vCluster](https://www.vcluster
 
 ## How It Works
 
-The operator watches for vCluster StatefulSets (labeled `app=vcluster`) across your cluster. For each one it:
+The operator watches for vCluster control planes across your cluster: the StatefulSets and Deployments labeled
+`app=vcluster` (vcluster runs as a Deployment when it keeps no state of its own, for example with an external
+database or a separately deployed etcd). For each one it:
 
 1. Reads the TLS credentials from the vCluster secret (`vc-{name}`)
 2. Creates an ArgoCD cluster secret `vcluster-{namespace}-{name}` in the ArgoCD namespace, which registers the
@@ -41,7 +43,7 @@ helm install vcluster-argocd-enroller \
   --create-namespace
 ```
 
-The operator will immediately begin watching for vCluster StatefulSets and creating the corresponding ArgoCD cluster secrets.
+The operator will immediately begin watching for vClusters and creating the corresponding ArgoCD cluster secrets.
 
 ## Configuration
 
