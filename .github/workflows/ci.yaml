@@ -204,7 +204,7 @@ jobs:
     name: Integration Tests
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
-    # A normal run takes about three minutes; cluster creation has been seen to hang
+    # A normal run takes about seven minutes; cluster creation has been seen to hang
     timeout-minutes: 20
 
     steps:
