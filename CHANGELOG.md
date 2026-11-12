@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-11-11
+
 ### Changed (breaking)
 - ArgoCD cluster secrets are named `vcluster-{namespace}-{name}` and the ArgoCD cluster name is
   `{namespace}-{name}`, so same-named vClusters in different namespaces no longer overwrite each other.
@@ -30,7 +32,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Secrets that do not belong to the operator are never overwritten or deleted
 - The health port is configurable end to end (`networkPolicy.healthPort`)
 
-### Added (initial)
+## [1.x]
+
+### Added
 - Initial implementation of vCluster ArgoCD Enroller operator
 - Automatic detection and enrollment of vCluster instances in ArgoCD
 - Docker container image with multi-architecture support (amd64, arm64)
@@ -61,5 +65,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Initial release (placeholder for first tagged version)
 
-[Unreleased]: https://github.com/andrewrothstein/vcluster-argocd-enroller/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/andrewrothstein/vcluster-argocd-enroller/compare/v2.0.0...HEAD
+[2.0.0]: https://github.com/andrewrothstein/vcluster-argocd-enroller/compare/v1.2.2...v2.0.0
 [0.1.0]: https://github.com/andrewrothstein/vcluster-argocd-enroller/releases/tag/v0.1.0
