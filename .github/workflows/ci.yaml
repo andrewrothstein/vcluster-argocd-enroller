@@ -204,7 +204,7 @@ jobs:
     name: Integration Tests
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
-    # A normal run takes about three minutes; cluster creation has been seen to hang
+    # A normal run takes about seven minutes; cluster creation has been seen to hang
     timeout-minutes: 20
 
     steps:
@@ -254,6 +254,9 @@ jobs:
       - name: Enroll a real vcluster
         run: task k3d-vcluster
 
+      - name: Run the fleet example under ArgoCD
+        run: task k3d-fleet
+
       - name: Check deployment
         if: always()
         run: |
@@ -265,6 +268,8 @@ jobs:
           kubectl logs -n vcluster-system -l app.kubernetes.io/name=vcluster-argocd-enroller --tail=100 --prefix || true
           echo "=== ArgoCD cluster secrets ==="
           kubectl get secrets -n argocd --show-labels || true
+          echo "=== ArgoCD applications ==="
+          kubectl get applicationsets,applications -n argocd -o wide || true
           echo "=== vClusters ==="
           kubectl get statefulsets,deployments,pods -A -l app=vcluster -o wide || true
           echo "=== Events ==="

@@ -43,6 +43,9 @@ uv run vcluster-argocd-enroller check
 # Manually enroll a vCluster
 uv run vcluster-argocd-enroller enroll my-vcluster --namespace vcluster-ns
 
+# ...with labels and a project on its ArgoCD cluster secret
+uv run vcluster-argocd-enroller enroll my-vcluster --namespace vcluster-ns --label env=dev --label tier=gold --project team-a
+
 # Remove a vCluster from ArgoCD
 uv run vcluster-argocd-enroller unenroll my-vcluster vcluster-ns --confirm
 
@@ -73,15 +76,16 @@ uv run pytest
 # Run unit tests with coverage
 uv run pytest --cov=vcluster_argocd_enroller
 
-# Integration test in a throwaway k3d cluster: chart install, fake vClusters, then real vclusters (one
-# StatefulSet, one Deployment) whose enrolled credentials are checked against their API servers
-# (needs docker, k3d, kubectl, helm)
+# Integration test in a throwaway k3d cluster: chart install, fake vClusters, real vclusters (one
+# StatefulSet, one Deployment) whose enrolled credentials are checked against their API servers, then
+# examples/fleet under a real ArgoCD (needs docker, k3d, kubectl, helm)
 task k3d-test
 
 # The same steps one at a time, keeping the cluster around
 task k3d-up
 task k3d-smoke
 task k3d-vcluster
+task k3d-fleet
 task k3d-down
 
 # Check existing vClusters
@@ -102,7 +106,10 @@ The operator monitors StatefulSets and Deployments with the label `app: vcluster
    - Extracts the credentials from secret `vc-{vcluster-name}`
    - Creates ArgoCD cluster secret `vcluster-{namespace}-{vcluster-name}` in the ArgoCD namespace, or replaces it
      when its content differs
-   - Secret contains cluster endpoint and TLS certificates
+   - Secret contains cluster endpoint and TLS certificates, plus the labels and project the workload asks for
+     with its `vcluster-argocd-enroller/labels` and `vcluster-argocd-enroller/project` annotations
+   - A workload annotated `vcluster-argocd-enroller/enroll: "false"` is not enrolled, and an enrollment made
+     for it earlier is removed
    - Removes the `vcluster-{vcluster-name}` secret written by 1.x for the same vCluster
 
 2. **On Delete**:
@@ -110,7 +117,8 @@ The operator monitors StatefulSets and Deployments with the label `app: vcluster
      (a StatefulSet replaced by a Deployment of the same name, or the reverse)
    - Cleans up gracefully even if secret doesn't exist
 
-Secrets that the operator did not write for that vCluster are never replaced or deleted.
+Secrets that the operator did not write for that vCluster are never replaced or deleted. When it replaces one it
+did write, the labels and annotations something else added to it are kept.
 
 ## Configuration
 

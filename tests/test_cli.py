@@ -50,9 +50,9 @@ def vcluster_secret():
     )
 
 
-def vcluster_workload(name, namespace, replicas, ready):
+def vcluster_workload(name, namespace, replicas, ready, annotations=None):
     """Create a mock vCluster StatefulSet or Deployment, as far as `check` looks at it."""
-    workload = Mock(metadata=client.V1ObjectMeta(name=name, namespace=namespace))
+    workload = Mock(metadata=client.V1ObjectMeta(name=name, namespace=namespace, annotations=annotations))
     # Not a constructor argument: Mock(spec=...) means something else
     workload.spec = Mock(replicas=replicas)
     workload.status = Mock(ready_replicas=ready)
@@ -189,6 +189,16 @@ class TestCheck:
         assert "stateful" in output and "1/1" in output
         assert "stateless" in output and "0/2" in output
 
+    def test_opted_out_vcluster_is_marked(self, core_v1, apps_v1, capsys):
+        opted_out = vcluster_workload(
+            "private", "team-c", replicas=1, ready=1, annotations={"vcluster-argocd-enroller/enroll": "false"}
+        )
+        apps_v1.list_stateful_set_for_all_namespaces.return_value.items.append(opted_out)
+
+        cli.check()
+
+        assert capsys.readouterr().out.count("opted out") == 1
+
     def test_namespace_limits_both_listings(self, core_v1, apps_v1):
         cli.check(namespace="team-b")
 
@@ -220,6 +230,26 @@ class TestEnroll:
         assert base64.b64decode(kwargs["body"]["data"]["name"]).decode("utf-8") == "team-a-my-cluster"
         server = base64.b64decode(kwargs["body"]["data"]["server"]).decode("utf-8")
         assert server == "https://my-cluster.team-a"
+
+    def test_labels_and_project_are_set(self, core_v1):
+        core_v1.read_namespaced_secret.side_effect = [ApiException(status=404), vcluster_secret()]
+
+        cli.enroll("my-cluster", "team-a", label=["env=dev", "example.com/team=payments"], project="payments")
+
+        body = core_v1.create_namespaced_secret.call_args.kwargs["body"]
+        assert body["metadata"]["labels"]["env"] == "dev"
+        assert body["metadata"]["labels"]["example.com/team"] == "payments"
+        assert body["metadata"]["annotations"] == {"vcluster-argocd-enroller/copied-labels": "env,example.com/team"}
+        assert base64.b64decode(body["data"]["project"]).decode("utf-8") == "payments"
+
+    @pytest.mark.parametrize("label", ["env", "vcluster-operator=false"])
+    def test_invalid_label_exits_before_touching_the_cluster(self, core_v1, label):
+        with pytest.raises(SystemExit) as exc:
+            cli.enroll("my-cluster", "team-a", label=[label])
+
+        assert exc.value.code == 1
+        core_v1.read_namespaced_secret.assert_not_called()
+        core_v1.create_namespaced_secret.assert_not_called()
 
     def test_already_enrolled_is_left_alone(self, core_v1):
         cli.enroll("my-cluster", "team-a")

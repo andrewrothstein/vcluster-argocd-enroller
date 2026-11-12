@@ -1,0 +1,45 @@
+# One ArgoCD Application per enrolled vCluster, deploying into it.
+# The cluster generator reads the cluster secrets the enroller writes, so a vCluster is picked up as soon as
+# it is enrolled and dropped as soon as it is gone.
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: vcluster-bootstrap
+  namespace: argocd
+spec:
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
+  generators:
+    - clusters:
+        selector:
+          # Every cluster the enroller enrolled...
+          matchLabels:
+            vcluster-operator: "true"
+          # ...whose vCluster asked for an `env` label. `matchLabels: {env: dev}` picks one environment.
+          matchExpressions:
+            - key: env
+              operator: Exists
+  template:
+    metadata:
+      # {{.name}} is the ArgoCD cluster name, {namespace}-{name}
+      name: 'bootstrap-{{.name}}'
+      # The labels of the cluster secret are there to template with
+      labels:
+        env: '{{index .metadata.labels "env"}}'
+      # No resources finalizer: when the vCluster goes, so does everything in it, and ArgoCD could no
+      # longer reach it to clean up.
+    spec:
+      project: default
+      source:
+        repoURL: https://github.com/argoproj/argocd-example-apps
+        targetRevision: HEAD
+        path: guestbook
+      destination:
+        name: '{{.name}}'
+        namespace: guestbook
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true

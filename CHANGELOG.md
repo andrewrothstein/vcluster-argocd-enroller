@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Per-vCluster settings, as annotations on the vCluster's StatefulSet or Deployment:
+  - `vcluster-argocd-enroller/labels: key=value,key=value` puts labels on the ArgoCD cluster secret, for
+    ApplicationSet cluster generators to select on and template with
+  - `vcluster-argocd-enroller/project` sets the ArgoCD project the cluster is scoped to
+  - `vcluster-argocd-enroller/enroll: "false"` keeps the vCluster out of ArgoCD, and removes the enrollment the
+    operator made for it. `check` marks such a vCluster `(opted out)`
+- `enroll --label key=value --project name`
+- `examples/fleet`: a vCluster fleet created, enrolled and bootstrapped with ArgoCD ApplicationSets, run against
+  a real ArgoCD by `task k3d-fleet` and in CI
+
+### Changed
+- Labels and annotations that something else put on an ArgoCD cluster secret (ArgoCD's own
+  `auto-label-cluster-info` labels, for example) are kept when the operator replaces the secret, and no longer
+  count as a difference to repair
+
 ## [2.1.0] - 2026-11-12
 
 ### Added

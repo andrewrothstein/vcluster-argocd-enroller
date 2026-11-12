@@ -71,6 +71,20 @@ The following table lists the configurable parameters and their default values:
 | `networkPolicy.apiServer.port` | API server egress port | `443` |
 | `networkPolicy.apiServer.additionalPorts` | Extra API server egress ports | `[6443]` |
 
+### Per-vCluster Annotations
+
+Some settings belong to a vCluster rather than to the operator. They are annotations on the vCluster's StatefulSet
+or Deployment (`controlPlane.statefulSet.annotations` in the vcluster chart):
+
+| Annotation | Effect |
+| ---------- | ------ |
+| `vcluster-argocd-enroller/labels` | Labels for the ArgoCD cluster secret, as `key=value,key=value` |
+| `vcluster-argocd-enroller/project` | The ArgoCD project the cluster is scoped to |
+| `vcluster-argocd-enroller/enroll` | `"false"` keeps the vCluster out of ArgoCD |
+
+See the [project README](https://github.com/andrewrothstein/vcluster-argocd-enroller#per-vcluster-settings) for
+the details.
+
 ## Uninstallation
 
 ```bash

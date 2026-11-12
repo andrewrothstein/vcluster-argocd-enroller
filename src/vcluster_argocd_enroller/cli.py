@@ -117,7 +117,7 @@ def check(
     from kubernetes import client, config
     from rich.table import Table
 
-    from .operator import ARGOCD_NAMESPACE, ar_secret_name, vc_name
+    from .operator import ARGOCD_NAMESPACE, ar_secret_name, opted_out, vc_name
 
     try:
         config.load_incluster_config()
@@ -179,6 +179,9 @@ def check(
             argocd_secret_status = "Y"
         except client.exceptions.ApiException:
             argocd_secret_status = "N"
+        # The operator keeps a vCluster annotated this way out of ArgoCD
+        if opted_out(workload.metadata.annotations or {}):
+            argocd_secret_status += " (opted out)"
 
         table.add_row(ns, vcluster_name, ready, vc_secret_status, argocd_secret_status)
 
@@ -204,8 +207,13 @@ def enroll(
     namespace: str = "default",
     *,
     force: bool = False,
+    label: Annotated[Optional[list[str]], cyclopts.Parameter(negative="")] = None,
+    project: Optional[str] = None,
 ) -> None:
     """Manually enroll a vCluster in ArgoCD.
+
+    A running operator re-syncs the enrollment from the annotations of the vCluster's workload, so set
+    labels and the project there when the operator is in charge.
 
     Parameters
     ----------
@@ -215,12 +223,22 @@ def enroll(
         Namespace where vCluster is deployed
     force : bool
         Force re-enrollment even if already exists
+    label : list of str, optional
+        Label for the ArgoCD cluster secret, as key=value; repeat for more than one
+    project : str, optional
+        ArgoCD project the cluster is scoped to
     """
     from typing import cast
 
     from kubernetes import client, config
 
-    from .operator import ARGOCD_NAMESPACE, ar_secret_name, build_argocd_secret
+    from .operator import ARGOCD_NAMESPACE, ar_secret_name, build_argocd_secret, parse_label
+
+    try:
+        labels = dict(parse_label(entry) for entry in label or [])
+    except ValueError as e:
+        console.print(f"[red]Invalid --label: {e}[/red]")
+        sys.exit(1)
 
     try:
         config.load_incluster_config()
@@ -252,7 +270,9 @@ def enroll(
         sys.exit(1)
 
     try:
-        argocd_secret = cast(client.V1Secret, build_argocd_secret(vcluster_name, namespace, vc_secret))
+        argocd_secret = cast(
+            client.V1Secret, build_argocd_secret(vcluster_name, namespace, vc_secret, labels=labels, project=project)
+        )
     except KeyError as e:
         console.print(f"[red]vCluster secret {vc_secret_name} has no {e} entry[/red]")
         sys.exit(1)
