@@ -1,7 +1,16 @@
 # Default values for vcluster-argocd-enroller.
 
-# Replica count for the operator deployment
+# Replica count for the operator deployment. More than one needs leaderElection.enabled:
+# only one replica works at a time, the others are standbys.
 replicaCount: 1
+
+# Leader election between replicas
+leaderElection:
+  # Elect one active replica through a kopf ClusterKopfPeering object; a standby takes over about
+  # a minute after the active one is gone. Needs the ClusterKopfPeering CRD from this chart's crds/
+  # directory, which Helm installs with `helm install` but not with `helm upgrade`: apply it by hand
+  # before turning this on for a release installed from a chart older than 2.0.0.
+  enabled: false
 
 # Image configuration
 image:
@@ -69,14 +78,23 @@ affinity: {}
 
 # Operator configuration
 operator:
-  # Namespace where vCluster instances are deployed
+  # Namespace the operator is deployed into. vClusters are watched in every namespace.
   vclusterNamespace: vcluster-system
 
   # Namespace where ArgoCD is deployed
   argoCDNamespace: argocd
 
+  # Address ArgoCD reaches each vCluster at; {name} and {namespace} are replaced with the vCluster's.
+  # The certificate a vCluster serves is valid for <name>.<namespace> but not for
+  # <name>.<namespace>.svc.cluster.local, unless that is listed in its controlPlane.proxy.extraSANs.
+  serverURL: "https://{name}.{namespace}"
+
   # Log level (DEBUG, INFO, WARNING, ERROR)
   logLevel: INFO
+
+  # Seconds between re-syncs of each vCluster. A re-sync picks up credentials vcluster has rotated
+  # and restores an ArgoCD secret that was changed or removed; it writes nothing when all is in sync.
+  resyncInterval: 300
 
 # Additional environment variables for the operator
 env: []
@@ -111,7 +129,8 @@ networkPolicy:
   # Enable network policy
   enabled: true
 
-  # Port the operator serves health probes on; ingress is allowed to it so kubelet probes work
+  # Port the operator serves health probes on (also used with the policy disabled); ingress is
+  # allowed to it so kubelet probes work
   healthPort: 8080
 
   # Kubernetes API server egress. The API server is usually not a pod, so it is allowed by

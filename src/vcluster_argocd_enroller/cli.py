@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import random
 import sys
 from typing import Annotated, Literal, Optional
 
@@ -11,6 +12,9 @@ from rich.console import Console
 from . import __version__
 
 console = Console()
+
+# Replicas sharing a peering draw a random priority, so exactly one outranks the rest; --dev outranks them all.
+MAX_PRIORITY = 2**31 - 1
 app = cyclopts.App(
     name="vcluster-argocd-enroller",
     version=__version__,
@@ -27,10 +31,10 @@ def run(
     log_level: Annotated[
         Literal["DEBUG", "INFO", "WARNING", "ERROR"], cyclopts.Parameter(env_var="LOG_LEVEL")
     ] = "INFO",
-    standalone: bool = False,
-    priority: int = 0,
-    peering_name: Optional[str] = None,
+    priority: Optional[int] = None,
+    peering_name: Annotated[Optional[str], cyclopts.Parameter(env_var="PEERING_NAME")] = None,
     clusterwide: bool = True,
+    health_port: Annotated[int, cyclopts.Parameter(env_var="HEALTH_PORT")] = 8080,
 ) -> None:
     """Run the vCluster ArgoCD enrollment operator.
 
@@ -39,19 +43,20 @@ def run(
     namespace : str, optional
         Namespace to watch for vClusters (default: all namespaces)
     dev : bool
-        Run in development mode (kopf --dev: take priority over other running instances)
+        Run in development mode (with --peering-name: outrank every other instance, so they pause)
     verbose : bool
         Enable verbose output (sets log level to DEBUG)
     log_level : str
         Logging level (DEBUG, INFO, WARNING, ERROR); defaults to $LOG_LEVEL
-    standalone : bool
-        Run in standalone mode (no peering)
-    priority : int
-        Operator priority for peering
+    priority : int, optional
+        Priority among the instances sharing --peering-name (default: random, so replicas never tie)
     peering_name : str, optional
-        Custom peering name for multiple operators
+        Name of the kopf peering object used for leader election: only the instance with the highest
+        priority works, the rest stand by. Defaults to $PEERING_NAME; without it there is no peering.
     clusterwide : bool
         Watch cluster-wide (default: True)
+    health_port : int
+        Port serving /healthz for liveness and readiness probes; defaults to $HEALTH_PORT
     """
     import kopf
     import uvloop
@@ -74,15 +79,21 @@ def run(
     # Import operator module to register handlers
     from . import operator  # noqa: F401
 
+    if dev:
+        priority = MAX_PRIORITY
+    elif priority is None:
+        priority = random.randrange(MAX_PRIORITY)
+
     console.print("[green]Starting operator...[/green]")
     # Same loop setup as `kopf run`: kopf only picks uvloop by itself when launched from its own CLI.
     with asyncio.Runner(loop_factory=uvloop.new_event_loop) as runner:
         kopf.run(
             loop=runner.get_loop(),
-            standalone=standalone or None,
-            priority=666 if dev else priority or None,
+            # Peering is opt-in: kopf would otherwise join any peering object named "default" it finds.
+            standalone=not peering_name,
+            priority=priority,
             peering_name=peering_name,
-            liveness_endpoint="http://0.0.0.0:8080/healthz",
+            liveness_endpoint=f"http://0.0.0.0:{health_port}/healthz",
             clusterwide=clusterwide and not namespace,
             namespaces=[namespace] if namespace else [],
         )
@@ -155,7 +166,7 @@ def check(
             vc_secret_status = "N"
 
         # Check for ArgoCD secret
-        argocd_secret_name = ar_secret_name(vcluster_name)
+        argocd_secret_name = ar_secret_name(ns, vcluster_name)
         try:
             v1.read_namespaced_secret(name=argocd_secret_name, namespace=ARGOCD_NAMESPACE)
             argocd_secret_status = "Y"
@@ -177,7 +188,7 @@ def check(
 
             console.print(f"\n[cyan]{ns}/{vcluster_name}:[/cyan]")
             console.print(f"  vCluster Secret: vc-{vcluster_name}")
-            console.print(f"  ArgoCD Secret: {ar_secret_name(vcluster_name)}")
+            console.print(f"  ArgoCD Secret: {ar_secret_name(ns, vcluster_name)}")
 
 
 @app.command
@@ -212,12 +223,12 @@ def enroll(
     v1 = client.CoreV1Api()
 
     # Check for existing ArgoCD secret
-    argocd_secret_name = ar_secret_name(vcluster_name)
+    argocd_secret_name = ar_secret_name(namespace, vcluster_name)
 
     if not force:
         try:
             v1.read_namespaced_secret(name=argocd_secret_name, namespace=ARGOCD_NAMESPACE)
-            console.print(f"[yellow]vCluster {vcluster_name} already enrolled in ArgoCD[/yellow]")
+            console.print(f"[yellow]vCluster {namespace}/{vcluster_name} already enrolled in ArgoCD[/yellow]")
             console.print("[dim]Use --force to re-enroll[/dim]")
             return
         except client.exceptions.ApiException as e:
@@ -248,7 +259,7 @@ def enroll(
                 raise
             v1.replace_namespaced_secret(name=argocd_secret_name, namespace=ARGOCD_NAMESPACE, body=argocd_secret)
             console.print("[yellow]Replaced existing ArgoCD secret[/yellow]")
-        console.print(f"[green]Successfully enrolled vCluster {vcluster_name} in ArgoCD[/green]")
+        console.print(f"[green]Successfully enrolled vCluster {namespace}/{vcluster_name} in ArgoCD[/green]")
     except client.exceptions.ApiException as e:
         console.print(f"[red]Failed to create ArgoCD secret: {e}[/red]")
         sys.exit(1)
@@ -257,15 +268,20 @@ def enroll(
 @app.command
 def unenroll(
     vcluster_name: str,
+    namespace: str = "default",
     *,
     confirm: bool = False,
 ) -> None:
     """Remove a vCluster from ArgoCD.
 
+    A running operator enrolls the vCluster again on its next re-sync for as long as the vCluster exists.
+
     Parameters
     ----------
     vcluster_name : str
         Name of the vCluster to unenroll
+    namespace : str
+        Namespace where vCluster is deployed
     confirm : bool
         Skip confirmation prompt
     """
@@ -274,7 +290,7 @@ def unenroll(
     from .operator import ARGOCD_NAMESPACE, ar_secret_name
 
     if not confirm:
-        response = console.input(f"[yellow]Remove {vcluster_name} from ArgoCD? [y/N]:[/yellow] ")
+        response = console.input(f"[yellow]Remove {namespace}/{vcluster_name} from ArgoCD? [y/N]:[/yellow] ")
         if response.lower() != "y":
             console.print("[dim]Cancelled[/dim]")
             return
@@ -285,17 +301,82 @@ def unenroll(
         config.load_kube_config()
 
     v1 = client.CoreV1Api()
-    argocd_secret_name = ar_secret_name(vcluster_name)
+    argocd_secret_name = ar_secret_name(namespace, vcluster_name)
 
     try:
         v1.delete_namespaced_secret(name=argocd_secret_name, namespace=ARGOCD_NAMESPACE)
-        console.print(f"[green]Successfully removed vCluster {vcluster_name} from ArgoCD[/green]")
+        console.print(f"[green]Successfully removed vCluster {namespace}/{vcluster_name} from ArgoCD[/green]")
     except client.exceptions.ApiException as e:
         if e.status == 404:
-            console.print(f"[yellow]vCluster {vcluster_name} not found in ArgoCD[/yellow]")
+            console.print(f"[yellow]vCluster {namespace}/{vcluster_name} not found in ArgoCD[/yellow]")
         else:
             console.print(f"[red]Failed to remove ArgoCD secret: {e}[/red]")
             sys.exit(1)
+
+
+@app.command
+def verify(
+    vcluster_name: str,
+    namespace: str = "default",
+) -> None:
+    """Check that the credentials enrolled in ArgoCD reach the vCluster's API server.
+
+    Connects the way ArgoCD does, so it has to run where the vCluster's Service resolves (inside the cluster).
+
+    Parameters
+    ----------
+    vcluster_name : str
+        Name of the vCluster to verify
+    namespace : str
+        Namespace where vCluster is deployed
+    """
+    import json
+    import tempfile
+    from pathlib import Path
+
+    from kubernetes import client, config
+
+    from .operator import ARGOCD_NAMESPACE, ar_secret_name, decode
+
+    try:
+        config.load_incluster_config()
+    except config.ConfigException:
+        config.load_kube_config()
+
+    v1 = client.CoreV1Api()
+    argocd_secret_name = ar_secret_name(namespace, vcluster_name)
+
+    try:
+        data = v1.read_namespaced_secret(name=argocd_secret_name, namespace=ARGOCD_NAMESPACE).data or {}
+    except client.exceptions.ApiException as e:
+        console.print(f"[red]Failed to read ArgoCD secret {argocd_secret_name}: {e.status} {e.reason}[/red]")
+        sys.exit(1)
+
+    try:
+        server = decode(data["server"])
+        tls = json.loads(decode(data["config"]))["tlsClientConfig"]
+        credentials = {key: decode(tls[key]) for key in ("caData", "certData", "keyData")}
+    except (KeyError, ValueError) as e:
+        console.print(f"[red]ArgoCD secret {argocd_secret_name} is malformed: {e}[/red]")
+        sys.exit(1)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        for key, pem in credentials.items():
+            Path(tmp, key).write_text(pem)
+
+        configuration = client.Configuration()
+        configuration.host = server
+        configuration.ssl_ca_cert = str(Path(tmp, "caData"))
+        configuration.cert_file = str(Path(tmp, "certData"))
+        configuration.key_file = str(Path(tmp, "keyData"))
+
+        try:
+            version = client.VersionApi(client.ApiClient(configuration)).get_code()
+        except Exception as e:
+            console.print(f"[red]Failed to reach {server} with the enrolled credentials: {e}[/red]")
+            sys.exit(1)
+
+    console.print(f"[green]{server} answers with the enrolled credentials (Kubernetes {version.git_version})[/green]")
 
 
 def main():

@@ -42,7 +42,8 @@ The following table lists the configurable parameters and their default values:
 
 | Parameter | Description | Default |
 | --------- | ----------- | ------- |
-| `replicaCount` | Number of operator replicas | `1` |
+| `replicaCount` | Number of operator replicas; more than one needs `leaderElection.enabled` | `1` |
+| `leaderElection.enabled` | Run one active replica and keep the others on standby (needs the ClusterKopfPeering CRD) | `false` |
 | `image.repository` | Image repository | `ghcr.io/andrewrothstein/vcluster-argocd-enroller` |
 | `image.pullPolicy` | Image pull policy | `IfNotPresent` |
 | `image.tag` | Image tag (defaults to chart appVersion) | `""` |
@@ -58,12 +59,14 @@ The following table lists the configurable parameters and their default values:
 | `resources.requests.memory` | Memory request | `128Mi` |
 | `operator.vclusterNamespace` | Namespace where the operator is deployed (vClusters are watched cluster-wide) | `vcluster-system` |
 | `operator.argoCDNamespace` | ArgoCD namespace | `argocd` |
+| `operator.serverURL` | Address ArgoCD reaches each vCluster at; `{name}` and `{namespace}` are replaced | `https://{name}.{namespace}` |
+| `operator.resyncInterval` | Seconds between re-syncs of each vCluster (credential rotation, drift) | `300` |
 | `operator.logLevel` | Log level (DEBUG, INFO, WARNING, ERROR) | `INFO` |
 | `rbac.create` | Create RBAC resources | `true` |
-| `autoscaling.enabled` | Enable HPA | `false` |
+| `autoscaling.enabled` | Enable HPA (needs `leaderElection.enabled`; extra replicas are standbys) | `false` |
 | `podDisruptionBudget.enabled` | Enable PDB | `false` |
 | `networkPolicy.enabled` | Enable NetworkPolicy | `true` |
-| `networkPolicy.healthPort` | Health probe port allowed for ingress | `8080` |
+| `networkPolicy.healthPort` | Port the operator serves health probes on, allowed for ingress | `8080` |
 | `networkPolicy.apiServer.cidr` | CIDR allowed for API server egress | `0.0.0.0/0` |
 | `networkPolicy.apiServer.port` | API server egress port | `443` |
 | `networkPolicy.apiServer.additionalPorts` | Extra API server egress ports | `[6443]` |
@@ -78,10 +81,15 @@ helm uninstall vcluster-argocd-enroller -n vcluster-system
 
 ### High Availability
 
-For production deployments, consider:
+The operator does its work in one replica. With leader election the others are standbys: one takes over as soon as
+the active replica shuts down, or within about a minute of it disappearing without notice. Extra replicas add
+availability, not throughput, and without `leaderElection.enabled` the chart refuses to render more than one.
 
 ```yaml
 replicaCount: 2
+
+leaderElection:
+  enabled: true
 
 podDisruptionBudget:
   enabled: true
@@ -101,9 +109,18 @@ affinity:
         topologyKey: kubernetes.io/hostname
 ```
 
+Leader election uses a [kopf peering](https://kopf.readthedocs.io/en/stable/peering/) object, a
+`ClusterKopfPeering` named after the release, whose CRD ships in this chart's `crds/` directory:
+
+- `helm install` installs the CRD. `helm upgrade` does not, so when enabling leader election on a release that was
+  installed from a chart older than 2.0.0, apply it first:
+  `kubectl apply -f helm/vcluster-argocd-enroller/crds/clusterkopfpeering.yaml`
+- ArgoCD installs the CRD along with the chart; if the first sync complains that `ClusterKopfPeering` is unknown, add
+  the `SkipDryRunOnMissingResource=true` sync option.
+
 ### Resource Optimization
 
-For large deployments with many vClusters:
+For large deployments with many vClusters, give the active replica more room:
 
 ```yaml
 resources:
@@ -113,12 +130,6 @@ resources:
   requests:
     cpu: 200m
     memory: 256Mi
-
-autoscaling:
-  enabled: true
-  minReplicas: 2
-  maxReplicas: 5
-  targetCPUUtilizationPercentage: 70
 ```
 
 ### Network Policies
@@ -151,6 +162,17 @@ kubectl logs -l app.kubernetes.io/name=vcluster-argocd-enroller -n vcluster-syst
 ```bash
 kubectl auth can-i get secrets --as=system:serviceaccount:vcluster-system:vcluster-argocd-enroller -n vcluster-system
 kubectl auth can-i create secrets --as=system:serviceaccount:vcluster-system:vcluster-argocd-enroller -n argocd
+```
+
+### Verify an Enrollment
+
+Connect to a vCluster with the credentials ArgoCD was given, from inside the cluster:
+
+```bash
+kubectl run verify-enrollment --rm -i --restart=Never -n vcluster-system \
+  --image=ghcr.io/andrewrothstein/vcluster-argocd-enroller:<version> \
+  --overrides='{"spec":{"serviceAccountName":"vcluster-argocd-enroller"}}' \
+  --command -- vcluster-argocd-enroller verify <vcluster-name> <vcluster-namespace>
 ```
 
 ### Debug Mode

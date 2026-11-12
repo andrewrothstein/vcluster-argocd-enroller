@@ -1,3 +1,6 @@
+{{- if and (not .Values.leaderElection.enabled) (or (gt (int .Values.replicaCount) 1) .Values.autoscaling.enabled) }}
+{{- fail "replicaCount > 1 and autoscaling need leaderElection.enabled=true: without it every replica handles every vCluster" }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -48,15 +51,32 @@ spec:
         command:
         - vcluster-argocd-enroller
         env:
-        - name: VCLUSTER_NAMESPACE
-          value: {{ include "vcluster-argocd-enroller.vclusterNamespace" . | quote }}
         - name: ARGOCD_NAMESPACE
           value: {{ include "vcluster-argocd-enroller.argoCDNamespace" . | quote }}
+        - name: SERVER_URL
+          value: {{ .Values.operator.serverURL | quote }}
         - name: LOG_LEVEL
           value: {{ .Values.operator.logLevel | quote }}
+        - name: RESYNC_INTERVAL
+          value: {{ .Values.operator.resyncInterval | quote }}
+        - name: HEALTH_PORT
+          value: {{ .Values.networkPolicy.healthPort | quote }}
+        {{- if .Values.leaderElection.enabled }}
+        - name: PEERING_NAME
+          value: {{ include "vcluster-argocd-enroller.fullname" . | quote }}
+        # kopf identifies each peer by this
+        - name: POD_ID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        {{- end }}
         {{- with .Values.env }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
+        ports:
+        - name: health
+          containerPort: {{ .Values.networkPolicy.healthPort }}
+          protocol: TCP
         {{- with .Values.volumeMounts }}
         volumeMounts:
         {{- toYaml . | nindent 8 }}
@@ -69,7 +89,7 @@ spec:
         livenessProbe:
           httpGet:
             path: /healthz
-            port: 8080
+            port: health
           initialDelaySeconds: {{ .Values.livenessProbe.initialDelaySeconds }}
           periodSeconds: {{ .Values.livenessProbe.periodSeconds }}
           timeoutSeconds: {{ .Values.livenessProbe.timeoutSeconds }}
@@ -80,7 +100,7 @@ spec:
         readinessProbe:
           httpGet:
             path: /healthz
-            port: 8080
+            port: health
           initialDelaySeconds: {{ .Values.readinessProbe.initialDelaySeconds }}
           periodSeconds: {{ .Values.readinessProbe.periodSeconds }}
           timeoutSeconds: {{ .Values.readinessProbe.timeoutSeconds }}
