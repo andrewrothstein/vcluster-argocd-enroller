@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-11-12
+
 ### Added
 - Per-vCluster settings, as annotations on the vCluster's StatefulSet or Deployment:
   - `vcluster-argocd-enroller/labels: key=value,key=value` puts labels on the ArgoCD cluster secret, for
@@ -93,7 +95,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Initial release (placeholder for first tagged version)
 
-[Unreleased]: https://github.com/andrewrothstein/vcluster-argocd-enroller/compare/v2.1.0...HEAD
+[Unreleased]: https://github.com/andrewrothstein/vcluster-argocd-enroller/compare/v2.2.0...HEAD
+[2.2.0]: https://github.com/andrewrothstein/vcluster-argocd-enroller/compare/v2.1.0...v2.2.0
 [2.1.0]: https://github.com/andrewrothstein/vcluster-argocd-enroller/compare/v2.0.0...v2.1.0
 [2.0.0]: https://github.com/andrewrothstein/vcluster-argocd-enroller/compare/v1.2.2...v2.0.0
 [0.1.0]: https://github.com/andrewrothstein/vcluster-argocd-enroller/releases/tag/v0.1.0
