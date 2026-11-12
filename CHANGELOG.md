@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- vClusters whose control plane is a Deployment (external database, deployed or external etcd, no
+  persistence) are enrolled like StatefulSet ones. The chart's ClusterRole now covers `deployments`
+- A vCluster that changes from a StatefulSet to a Deployment, or back, keeps its enrollment
+- `check` lists Deployment-based vClusters
+
+### Fixed
+- Only `apps` StatefulSets are watched: resources of the same name in another API group (such as
+  OpenKruise's) are no longer picked up
+
 ## [2.0.0] - 2026-11-11
 
 ### Changed (breaking)

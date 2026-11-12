@@ -4,7 +4,7 @@ A Kubernetes operator with CLI that automatically enrolls vCluster instances in 
 
 ## Overview
 
-This operator watches for vCluster StatefulSets and automatically:
+This operator watches for vCluster StatefulSets and Deployments and automatically:
 1. Extracts the vCluster credentials from its secret
 2. Creates an ArgoCD cluster secret with proper authentication, and keeps it in sync
 3. Cleans up ArgoCD secrets when vClusters are deleted
@@ -73,8 +73,9 @@ uv run pytest
 # Run unit tests with coverage
 uv run pytest --cov=vcluster_argocd_enroller
 
-# Integration test in a throwaway k3d cluster: chart install, fake vClusters, then a real vcluster
-# whose enrolled credentials are checked against its API server (needs docker, k3d, kubectl, helm)
+# Integration test in a throwaway k3d cluster: chart install, fake vClusters, then real vclusters (one
+# StatefulSet, one Deployment) whose enrolled credentials are checked against their API servers
+# (needs docker, k3d, kubectl, helm)
 task k3d-test
 
 # The same steps one at a time, keeping the cluster around
@@ -95,7 +96,7 @@ task build
 
 ## How It Works
 
-The operator monitors StatefulSets with the label `app: vcluster` and:
+The operator monitors StatefulSets and Deployments with the label `app: vcluster` and:
 
 1. **On Create/Resume/Update, and every `RESYNC_INTERVAL` seconds**:
    - Extracts the credentials from secret `vc-{vcluster-name}`
@@ -105,7 +106,8 @@ The operator monitors StatefulSets with the label `app: vcluster` and:
    - Removes the `vcluster-{vcluster-name}` secret written by 1.x for the same vCluster
 
 2. **On Delete**:
-   - Removes the corresponding ArgoCD cluster secret
+   - Removes the corresponding ArgoCD cluster secret, unless the vCluster lives on as the other kind of workload
+     (a StatefulSet replaced by a Deployment of the same name, or the reverse)
    - Cleans up gracefully even if secret doesn't exist
 
 Secrets that the operator did not write for that vCluster are never replaced or deleted.
@@ -114,7 +116,7 @@ Secrets that the operator did not write for that vCluster are never replaced or 
 
 The operator expects:
 - vCluster secrets named: `vc-{vcluster-name}`
-- vCluster StatefulSets labeled with: `app=vcluster`
+- vCluster StatefulSets or Deployments labeled with: `app=vcluster`
 
 Environment variables (the Helm chart sets them from its values):
 

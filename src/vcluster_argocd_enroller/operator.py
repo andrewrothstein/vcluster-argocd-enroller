@@ -14,10 +14,17 @@ ARGOCD_NAMESPACE = os.getenv("ARGOCD_NAMESPACE", "argocd")
 SERVER_URL = os.getenv("SERVER_URL", "https://{name}.{namespace}")
 # What enrollments pointed at before SERVER_URL existed.
 LEGACY_SERVER_URL = "https://{name}.{namespace}.svc.cluster.local"
-# Seconds between re-syncs of each vCluster: vcluster rotates vc-<name> without touching the StatefulSet.
+# Seconds between re-syncs of each vCluster: vcluster rotates vc-<name> without touching its workload.
 RESYNC_INTERVAL = float(os.getenv("RESYNC_INTERVAL", "300"))
 # Attempts at removing the ArgoCD secret before a deleted vCluster is let go anyway.
 DELETE_RETRIES = 10
+
+# vcluster runs its control plane as a StatefulSet, or as a Deployment when it keeps no state of its own
+# (deployed or external etcd, an external database, persistence turned off). Both carry this label.
+VCLUSTER_LABELS = {"app": "vcluster"}
+# The watched resources, by plural name. They are named with their API group in the handlers below:
+# a bare "statefulsets" would also match the StatefulSets of other groups (OpenKruise's, for one).
+WORKLOAD_KINDS = {"statefulsets": "StatefulSet", "deployments": "Deployment"}
 
 OPERATOR_LABEL = "vcluster-operator"
 NAMESPACE_LABEL = "vcluster-argocd-enroller/namespace"
@@ -52,13 +59,13 @@ def _ensure_k8s() -> tuple[client.CoreV1Api, client.AppsV1Api]:
     return _core_v1_api, _apps_v1_api
 
 
-def vc_name(statefulset_name: str) -> str:
-    """Return the vCluster name for a StatefulSet.
+def vc_name(workload_name: str) -> str:
+    """Return the vCluster name for its StatefulSet or Deployment.
 
-    vcluster names the StatefulSet, the Service and the `vc-<name>` secret after the Helm release,
+    vcluster names the workload, the Service and the `vc-<name>` secret after the Helm release,
     so the name is used as-is (a release called `vcluster-foo` owns `vc-vcluster-foo`).
     """
-    return statefulset_name
+    return workload_name
 
 
 def argocd_cluster_name(namespace: str, vcluster_name: str) -> str:
@@ -172,18 +179,40 @@ def _delete_if_owned(core_v1_api: client.CoreV1Api, name: str, namespace: str, v
     return True
 
 
-def handle_vcluster_enrollment(statefulset_name: str, namespace: str, **kwargs):
+def _lives_on(apps_v1_api: client.AppsV1Api, deleted_plural: str, name: str, namespace: str) -> bool:
+    """Tell whether a vCluster whose workload is being deleted still runs as the other kind of workload.
+
+    Changing a vCluster's backing store or persistence replaces its StatefulSet with a Deployment of the
+    same name, or the other way round. The replacement keeps the enrollment.
+    """
+    try:
+        other: client.V1Deployment | client.V1StatefulSet
+        if deleted_plural == "statefulsets":
+            other = apps_v1_api.read_namespaced_deployment(name=name, namespace=namespace)
+        else:
+            other = apps_v1_api.read_namespaced_stateful_set(name=name, namespace=namespace)
+    except ApiException as e:
+        if e.status == 404:
+            return False
+        raise
+    meta = other.metadata
+    if meta is None or meta.deletion_timestamp is not None:
+        return False
+    return VCLUSTER_LABELS.items() <= (meta.labels or {}).items()
+
+
+def handle_vcluster_enrollment(workload_name: str, namespace: str, **kwargs):
     """Create or update the ArgoCD cluster secret for a vCluster."""
     core_v1_api, _ = _ensure_k8s()
 
-    vcluster_name = vc_name(statefulset_name)
+    vcluster_name = vc_name(workload_name)
     vcluster_secret_name = f"vc-{vcluster_name}"
     logger.debug(f"Syncing vcluster {namespace}/{vcluster_name} from secret {vcluster_secret_name}")
 
     try:
         vc_secret = core_v1_api.read_namespaced_secret(name=vcluster_secret_name, namespace=namespace)
     except ApiException as e:
-        # 404 is expected right after the StatefulSet appears: vcluster writes vc-<name> a little later.
+        # 404 is expected right after the workload appears: vcluster writes vc-<name> a little later.
         log = logger.warning if e.status == 404 else logger.error
         log(f"API error reading vcluster secret {namespace}/{vcluster_secret_name}: {e.status} {e.reason}")
         raise kopf.TemporaryError(
@@ -233,7 +262,7 @@ def handle_vcluster_enrollment(statefulset_name: str, namespace: str, **kwargs):
 def configure(settings: kopf.OperatorSettings, **_):
     """Configure operator settings."""
     settings.posting.enabled = False
-    # Keep kopf's progress/diffbase on annotations: the StatefulSet controller owns .status and drops
+    # Keep kopf's progress/diffbase on annotations: the workload's controller owns .status and drops
     # kopf's patches there, so retries would not survive an operator restart.
     settings.persistence.progress_storage = kopf.AnnotationsProgressStorage()
     settings.persistence.diffbase_storage = kopf.AnnotationsDiffBaseStorage()
@@ -241,49 +270,58 @@ def configure(settings: kopf.OperatorSettings, **_):
     settings.watching.server_timeout = 10 * 60
 
 
-@kopf.on.create("statefulsets", labels={"app": "vcluster"})
-def vcluster_created(name, namespace, meta, spec, **kwargs):
-    """Handle vcluster StatefulSet creation."""
-    logger.info(f"Detected new vcluster StatefulSet: {namespace}/{name}")
-    # No return value: kopf would persist it into the StatefulSet status, which the controller drops.
+@kopf.on.create("statefulsets.apps", labels=VCLUSTER_LABELS)
+@kopf.on.create("deployments.apps", labels=VCLUSTER_LABELS)
+def vcluster_created(name, namespace, meta, spec, resource, **kwargs):
+    """Handle vcluster workload creation."""
+    logger.info(f"Detected new vcluster {WORKLOAD_KINDS[resource.plural]}: {namespace}/{name}")
+    # No return value: kopf would persist it into the workload's status, which its controller drops.
     handle_vcluster_enrollment(name, namespace, **kwargs)
 
 
-@kopf.on.resume("statefulsets", labels={"app": "vcluster"})
-def vcluster_resumed(name, namespace, meta, spec, **kwargs):
-    """Handle existing vcluster StatefulSets when operator starts."""
-    logger.info(f"Detected existing vcluster StatefulSet: {namespace}/{name}")
-    # No return value: kopf would persist it into the StatefulSet status, which the controller drops.
+@kopf.on.resume("statefulsets.apps", labels=VCLUSTER_LABELS)
+@kopf.on.resume("deployments.apps", labels=VCLUSTER_LABELS)
+def vcluster_resumed(name, namespace, meta, spec, resource, **kwargs):
+    """Handle existing vcluster workloads when operator starts."""
+    logger.info(f"Detected existing vcluster {WORKLOAD_KINDS[resource.plural]}: {namespace}/{name}")
+    # No return value: kopf would persist it into the workload's status, which its controller drops.
     handle_vcluster_enrollment(name, namespace, **kwargs)
 
 
-@kopf.on.update("statefulsets", labels={"app": "vcluster"})
-def vcluster_updated(name, namespace, meta, spec, **kwargs):
-    """Handle vcluster StatefulSet updates."""
-    logger.info(f"Detected vcluster StatefulSet update: {namespace}/{name}")
-    # No return value: kopf would persist it into the StatefulSet status, which the controller drops.
+@kopf.on.update("statefulsets.apps", labels=VCLUSTER_LABELS)
+@kopf.on.update("deployments.apps", labels=VCLUSTER_LABELS)
+def vcluster_updated(name, namespace, meta, spec, resource, **kwargs):
+    """Handle vcluster workload updates."""
+    logger.info(f"Detected vcluster {WORKLOAD_KINDS[resource.plural]} update: {namespace}/{name}")
+    # No return value: kopf would persist it into the workload's status, which its controller drops.
     handle_vcluster_enrollment(name, namespace, **kwargs)
 
 
-@kopf.timer("statefulsets", labels={"app": "vcluster"}, interval=RESYNC_INTERVAL, initial_delay=RESYNC_INTERVAL)
+@kopf.timer("statefulsets.apps", labels=VCLUSTER_LABELS, interval=RESYNC_INTERVAL, initial_delay=RESYNC_INTERVAL)
+@kopf.timer("deployments.apps", labels=VCLUSTER_LABELS, interval=RESYNC_INTERVAL, initial_delay=RESYNC_INTERVAL)
 def vcluster_resync(name, namespace, **kwargs):
     """Re-sync periodically, picking up rotated credentials and restoring a changed or removed ArgoCD secret."""
     handle_vcluster_enrollment(name, namespace, **kwargs)
 
 
-@kopf.on.delete("statefulsets", labels={"app": "vcluster"}, retries=DELETE_RETRIES)
-def vcluster_deleted(name, namespace, **kwargs):
-    """Handle vcluster StatefulSet deletion.
+@kopf.on.delete("statefulsets.apps", labels=VCLUSTER_LABELS, retries=DELETE_RETRIES)
+@kopf.on.delete("deployments.apps", labels=VCLUSTER_LABELS, retries=DELETE_RETRIES)
+def vcluster_deleted(name, namespace, resource, **kwargs):
+    """Handle vcluster workload deletion.
 
-    Returns nothing: kopf would persist a return value into the StatefulSet status, which is being dropped.
+    Returns nothing: kopf would persist a return value into the workload's status, which is being dropped.
     """
-    core_v1_api, _ = _ensure_k8s()
+    core_v1_api, apps_v1_api = _ensure_k8s()
 
-    logger.info(f"Detected vcluster StatefulSet deletion: {namespace}/{name}")
+    kind = WORKLOAD_KINDS[resource.plural]
+    logger.info(f"Detected vcluster {kind} deletion: {namespace}/{name}")
 
     vcluster_name = vc_name(name)
 
     try:
+        if _lives_on(apps_v1_api, resource.plural, name, namespace):
+            logger.info(f"Keeping the enrollment of {namespace}/{vcluster_name}: only its {kind} is replaced")
+            return
         for secret_name in (ar_secret_name(namespace, vcluster_name), legacy_ar_secret_name(vcluster_name)):
             if _delete_if_owned(core_v1_api, secret_name, namespace, vcluster_name):
                 logger.info(f"Deleted ArgoCD cluster secret {secret_name} for {namespace}/{vcluster_name}")

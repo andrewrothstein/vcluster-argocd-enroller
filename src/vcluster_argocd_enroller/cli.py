@@ -127,13 +127,20 @@ def check(
     v1 = client.CoreV1Api()
     apps_v1 = client.AppsV1Api()
 
-    # Find vCluster StatefulSets
+    # Find vCluster control planes: StatefulSets, or Deployments for vClusters that keep no state of their own
+    workloads: list[client.V1StatefulSet | client.V1Deployment]
     if namespace:
-        statefulsets = apps_v1.list_namespaced_stateful_set(namespace=namespace, label_selector="app=vcluster")
+        workloads = [
+            *apps_v1.list_namespaced_stateful_set(namespace=namespace, label_selector="app=vcluster").items,
+            *apps_v1.list_namespaced_deployment(namespace=namespace, label_selector="app=vcluster").items,
+        ]
     else:
-        statefulsets = apps_v1.list_stateful_set_for_all_namespaces(label_selector="app=vcluster")
+        workloads = [
+            *apps_v1.list_stateful_set_for_all_namespaces(label_selector="app=vcluster").items,
+            *apps_v1.list_deployment_for_all_namespaces(label_selector="app=vcluster").items,
+        ]
 
-    if not statefulsets.items:
+    if not workloads:
         console.print("[yellow]No vClusters found[/yellow]")
         return
 
@@ -145,17 +152,17 @@ def check(
     table.add_column("Secret", style="blue")
     table.add_column("ArgoCD Secret", style="magenta")
 
-    for sts in statefulsets.items:
-        if not sts.metadata or not sts.metadata.namespace or not sts.metadata.name:
+    for workload in workloads:
+        if not workload.metadata or not workload.metadata.namespace or not workload.metadata.name:
             continue
-        ns = sts.metadata.namespace
-        name = sts.metadata.name
+        ns = workload.metadata.namespace
+        name = workload.metadata.name
 
         vcluster_name = vc_name(name)
 
         # Check readiness
-        ready_replicas = sts.status.ready_replicas if sts.status else None
-        ready = f"{ready_replicas or 0}/{sts.spec.replicas}"
+        ready_replicas = workload.status.ready_replicas if workload.status else None
+        ready = f"{ready_replicas or 0}/{workload.spec.replicas}"
 
         # Check for vcluster secret
         vc_secret_name = f"vc-{vcluster_name}"
@@ -179,11 +186,11 @@ def check(
 
     if show_secrets:
         console.print("\n[bold]Secret Details:[/bold]")
-        for sts in statefulsets.items:
-            if not sts.metadata or not sts.metadata.namespace or not sts.metadata.name:
+        for workload in workloads:
+            if not workload.metadata or not workload.metadata.namespace or not workload.metadata.name:
                 continue
-            ns = sts.metadata.namespace
-            name = sts.metadata.name
+            ns = workload.metadata.namespace
+            name = workload.metadata.name
             vcluster_name = vc_name(name)
 
             console.print(f"\n[cyan]{ns}/{vcluster_name}:[/cyan]")

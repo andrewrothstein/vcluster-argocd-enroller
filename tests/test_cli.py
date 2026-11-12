@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 import pytest
+from kubernetes import client
 from kubernetes.client.rest import ApiException
 
 from vcluster_argocd_enroller import cli
@@ -47,6 +48,15 @@ def vcluster_secret():
             "client-key": base64.b64encode(b"fake-key-data").decode("utf-8"),
         }
     )
+
+
+def vcluster_workload(name, namespace, replicas, ready):
+    """Create a mock vCluster StatefulSet or Deployment, as far as `check` looks at it."""
+    workload = Mock(metadata=client.V1ObjectMeta(name=name, namespace=namespace))
+    # Not a constructor argument: Mock(spec=...) means something else
+    workload.spec = Mock(replicas=replicas)
+    workload.status = Mock(ready_replicas=ready)
+    return workload
 
 
 class TestRun:
@@ -150,6 +160,41 @@ class TestRun:
 
         assert bound.arguments["peering_name"] == "enroller"
         assert bound.arguments["health_port"] == 9090
+
+
+class TestCheck:
+    """Test the enrollment overview."""
+
+    @pytest.fixture
+    def apps_v1(self):
+        """Serve one vCluster running as a StatefulSet and one running as a Deployment."""
+        mock_apps = Mock()
+        statefulset = vcluster_workload("stateful", "team-a", replicas=1, ready=1)
+        deployment = vcluster_workload("stateless", "team-b", replicas=2, ready=None)
+        for listing in (mock_apps.list_stateful_set_for_all_namespaces, mock_apps.list_namespaced_stateful_set):
+            listing.return_value = Mock(items=[statefulset])
+        for listing in (mock_apps.list_deployment_for_all_namespaces, mock_apps.list_namespaced_deployment):
+            listing.return_value = Mock(items=[deployment])
+        with patch("kubernetes.client.AppsV1Api", return_value=mock_apps):
+            yield mock_apps
+
+    def test_lists_statefulset_and_deployment_vclusters(self, core_v1, apps_v1, capsys):
+        cli.check()
+
+        apps_v1.list_stateful_set_for_all_namespaces.assert_called_once_with(label_selector="app=vcluster")
+        apps_v1.list_deployment_for_all_namespaces.assert_called_once_with(label_selector="app=vcluster")
+        core_v1.read_namespaced_secret.assert_any_call(name="vcluster-team-a-stateful", namespace="gitops")
+        core_v1.read_namespaced_secret.assert_any_call(name="vcluster-team-b-stateless", namespace="gitops")
+        output = capsys.readouterr().out
+        assert "stateful" in output and "1/1" in output
+        assert "stateless" in output and "0/2" in output
+
+    def test_namespace_limits_both_listings(self, core_v1, apps_v1):
+        cli.check(namespace="team-b")
+
+        apps_v1.list_namespaced_stateful_set.assert_called_once_with(namespace="team-b", label_selector="app=vcluster")
+        apps_v1.list_namespaced_deployment.assert_called_once_with(namespace="team-b", label_selector="app=vcluster")
+        apps_v1.list_deployment_for_all_namespaces.assert_not_called()
 
 
 class TestEnroll:

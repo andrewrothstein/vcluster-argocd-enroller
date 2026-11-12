@@ -4,6 +4,8 @@
 # Two of them share the name `smoke` in different namespaces, and ArgoCD already holds an enrollment
 # of vcluster-system/smoke under the name (and server address) used before 2.0.0, which the operator is
 # expected to migrate.
+#
+# fake-vcluster-deployment.yaml holds the Deployment that later takes the place of team-b's StatefulSet.
 apiVersion: v1
 kind: Namespace
 metadata:

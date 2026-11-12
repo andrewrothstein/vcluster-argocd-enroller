@@ -266,6 +266,6 @@ jobs:
           echo "=== ArgoCD cluster secrets ==="
           kubectl get secrets -n argocd --show-labels || true
           echo "=== vClusters ==="
-          kubectl get statefulsets,pods -A -l app=vcluster -o wide || true
+          kubectl get statefulsets,deployments,pods -A -l app=vcluster -o wide || true
           echo "=== Events ==="
           kubectl get events -n vcluster-system --sort-by='.lastTimestamp' | tail -30
