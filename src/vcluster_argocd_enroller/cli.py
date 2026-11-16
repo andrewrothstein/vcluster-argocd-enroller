@@ -22,6 +22,19 @@ app = cyclopts.App(
 )
 
 
+def _configure_k8s() -> None:
+    """Point the Kubernetes client at the cluster, or exit when there is no configuration to do it with."""
+    from kubernetes import config
+
+    from .operator import load_k8s_config
+
+    try:
+        load_k8s_config()
+    except config.ConfigException as e:
+        console.print(f"[red]Could not configure the Kubernetes client: {e}[/red]")
+        sys.exit(1)
+
+
 @app.default
 def run(
     *,
@@ -114,15 +127,12 @@ def check(
     show_secrets : bool
         Show secret details (default: False)
     """
-    from kubernetes import client, config
+    from kubernetes import client
     from rich.table import Table
 
-    from .operator import ARGOCD_NAMESPACE, ar_secret_name, opted_out, vc_name
+    from .operator import ar_secret_name, opted_out, owns, read_argocd_secret, vc_name
 
-    try:
-        config.load_incluster_config()
-    except config.ConfigException:
-        config.load_kube_config()
+    _configure_k8s()
 
     v1 = client.CoreV1Api()
     apps_v1 = client.AppsV1Api()
@@ -164,21 +174,26 @@ def check(
         ready_replicas = workload.status.ready_replicas if workload.status else None
         ready = f"{ready_replicas or 0}/{workload.spec.replicas}"
 
-        # Check for vcluster secret
+        # Check for vcluster secret. Only a 404 says there is none: any other failure is shown as what it is.
         vc_secret_name = f"vc-{vcluster_name}"
         try:
             v1.read_namespaced_secret(name=vc_secret_name, namespace=ns)
             vc_secret_status = "Y"
-        except client.exceptions.ApiException:
-            vc_secret_status = "N"
+        except client.exceptions.ApiException as e:
+            vc_secret_status = "N" if e.status == 404 else f"? ({e.status} {e.reason})"
 
-        # Check for ArgoCD secret
-        argocd_secret_name = ar_secret_name(ns, vcluster_name)
+        # Check for ArgoCD secret: one of that name that belongs to something else is no enrollment
         try:
-            v1.read_namespaced_secret(name=argocd_secret_name, namespace=ARGOCD_NAMESPACE)
-            argocd_secret_status = "Y"
-        except client.exceptions.ApiException:
-            argocd_secret_status = "N"
+            argocd_secret = read_argocd_secret(v1, ar_secret_name(ns, vcluster_name))
+        except client.exceptions.ApiException as e:
+            argocd_secret_status = f"? ({e.status} {e.reason})"
+        else:
+            if argocd_secret is None:
+                argocd_secret_status = "N"
+            elif owns(argocd_secret, ns, vcluster_name):
+                argocd_secret_status = "Y"
+            else:
+                argocd_secret_status = "N (name taken)"
         # The operator keeps a vCluster annotated this way out of ArgoCD
         if opted_out(workload.metadata.annotations or {}):
             argocd_secret_status += " (opted out)"
@@ -213,7 +228,8 @@ def enroll(
     """Manually enroll a vCluster in ArgoCD.
 
     A running operator re-syncs the enrollment from the annotations of the vCluster's workload, so set
-    labels and the project there when the operator is in charge.
+    labels and the project there when the operator is in charge. An ArgoCD secret of the same name that
+    is not this vCluster's enrollment is never overwritten, --force or not.
 
     Parameters
     ----------
@@ -228,11 +244,17 @@ def enroll(
     project : str, optional
         ArgoCD project the cluster is scoped to
     """
-    from typing import cast
+    from kubernetes import client
 
-    from kubernetes import client, config
-
-    from .operator import ARGOCD_NAMESPACE, ar_secret_name, build_argocd_secret, parse_label
+    from .operator import (
+        NotOwnedError,
+        ar_secret_name,
+        build_argocd_secret,
+        owns,
+        parse_label,
+        read_argocd_secret,
+        sync_enrollment,
+    )
 
     try:
         labels = dict(parse_label(entry) for entry in label or [])
@@ -240,10 +262,7 @@ def enroll(
         console.print(f"[red]Invalid --label: {e}[/red]")
         sys.exit(1)
 
-    try:
-        config.load_incluster_config()
-    except config.ConfigException:
-        config.load_kube_config()
+    _configure_k8s()
 
     v1 = client.CoreV1Api()
 
@@ -252,14 +271,14 @@ def enroll(
 
     if not force:
         try:
-            v1.read_namespaced_secret(name=argocd_secret_name, namespace=ARGOCD_NAMESPACE)
+            existing = read_argocd_secret(v1, argocd_secret_name)
+        except client.exceptions.ApiException as e:
+            console.print(f"[red]Failed to check ArgoCD secret {argocd_secret_name}: {e}[/red]")
+            sys.exit(1)
+        if existing is not None and owns(existing, namespace, vcluster_name):
             console.print(f"[yellow]vCluster {namespace}/{vcluster_name} already enrolled in ArgoCD[/yellow]")
             console.print("[dim]Use --force to re-enroll[/dim]")
             return
-        except client.exceptions.ApiException as e:
-            if e.status != 404:
-                console.print(f"[red]Failed to check ArgoCD secret {argocd_secret_name}: {e}[/red]")
-                sys.exit(1)
 
     # Read vCluster secret
     vc_secret_name = f"vc-{vcluster_name}"
@@ -270,26 +289,23 @@ def enroll(
         sys.exit(1)
 
     try:
-        argocd_secret = cast(
-            client.V1Secret, build_argocd_secret(vcluster_name, namespace, vc_secret, labels=labels, project=project)
-        )
+        argocd_secret = build_argocd_secret(vcluster_name, namespace, vc_secret, labels=labels, project=project)
     except KeyError as e:
         console.print(f"[red]vCluster secret {vc_secret_name} has no {e} entry[/red]")
         sys.exit(1)
 
-    # Create the secret, replacing an existing one in place when forced
+    # The operator's own sync: creates the secret, or replaces this vCluster's existing one in place
     try:
-        try:
-            v1.create_namespaced_secret(namespace=ARGOCD_NAMESPACE, body=argocd_secret)
-        except client.exceptions.ApiException as e:
-            if not (force and e.status == 409):
-                raise
-            v1.replace_namespaced_secret(name=argocd_secret_name, namespace=ARGOCD_NAMESPACE, body=argocd_secret)
-            console.print("[yellow]Replaced existing ArgoCD secret[/yellow]")
-        console.print(f"[green]Successfully enrolled vCluster {namespace}/{vcluster_name} in ArgoCD[/green]")
-    except client.exceptions.ApiException as e:
-        console.print(f"[red]Failed to create ArgoCD secret: {e}[/red]")
+        done = sync_enrollment(v1, namespace, vcluster_name, argocd_secret)
+    except NotOwnedError as e:
+        console.print(f"[red]{e}; not overwriting it[/red]")
         sys.exit(1)
+    except client.exceptions.ApiException as e:
+        console.print(f"[red]Failed to write ArgoCD secret {argocd_secret_name}: {e}[/red]")
+        sys.exit(1)
+    if done == "Updated":
+        console.print("[yellow]Replaced existing ArgoCD secret[/yellow]")
+    console.print(f"[green]Successfully enrolled vCluster {namespace}/{vcluster_name} in ArgoCD[/green]")
 
 
 @app.command
@@ -302,6 +318,7 @@ def unenroll(
     """Remove a vCluster from ArgoCD.
 
     A running operator enrolls the vCluster again on its next re-sync for as long as the vCluster exists.
+    An ArgoCD secret of the same name that is not this vCluster's enrollment is left alone.
 
     Parameters
     ----------
@@ -312,9 +329,9 @@ def unenroll(
     confirm : bool
         Skip confirmation prompt
     """
-    from kubernetes import client, config
+    from kubernetes import client
 
-    from .operator import ARGOCD_NAMESPACE, ar_secret_name
+    from .operator import remove_enrollment
 
     if not confirm:
         response = console.input(f"[yellow]Remove {namespace}/{vcluster_name} from ArgoCD? [y/N]:[/yellow] ")
@@ -322,23 +339,20 @@ def unenroll(
             console.print("[dim]Cancelled[/dim]")
             return
 
-    try:
-        config.load_incluster_config()
-    except config.ConfigException:
-        config.load_kube_config()
+    _configure_k8s()
 
     v1 = client.CoreV1Api()
-    argocd_secret_name = ar_secret_name(namespace, vcluster_name)
 
+    # The operator's own removal: also takes the secret 1.x wrote, and warns about one that is something else's
     try:
-        v1.delete_namespaced_secret(name=argocd_secret_name, namespace=ARGOCD_NAMESPACE)
-        console.print(f"[green]Successfully removed vCluster {namespace}/{vcluster_name} from ArgoCD[/green]")
+        deleted = remove_enrollment(v1, namespace, vcluster_name)
     except client.exceptions.ApiException as e:
-        if e.status == 404:
-            console.print(f"[yellow]vCluster {namespace}/{vcluster_name} not found in ArgoCD[/yellow]")
-        else:
-            console.print(f"[red]Failed to remove ArgoCD secret: {e}[/red]")
-            sys.exit(1)
+        console.print(f"[red]Failed to remove ArgoCD secret: {e}[/red]")
+        sys.exit(1)
+    if deleted:
+        console.print(f"[green]Successfully removed vCluster {namespace}/{vcluster_name} from ArgoCD[/green]")
+    else:
+        console.print(f"[yellow]vCluster {namespace}/{vcluster_name} not found in ArgoCD[/yellow]")
 
 
 @app.command
@@ -361,14 +375,11 @@ def verify(
     import tempfile
     from pathlib import Path
 
-    from kubernetes import client, config
+    from kubernetes import client
 
     from .operator import ARGOCD_NAMESPACE, ar_secret_name, decode
 
-    try:
-        config.load_incluster_config()
-    except config.ConfigException:
-        config.load_kube_config()
+    _configure_k8s()
 
     v1 = client.CoreV1Api()
     argocd_secret_name = ar_secret_name(namespace, vcluster_name)

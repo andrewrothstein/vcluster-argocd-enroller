@@ -50,6 +50,27 @@ def vcluster_secret():
     )
 
 
+def enrolled_secret(name, namespace, labels=None, annotations=None):
+    """Create the ArgoCD secret of a vCluster as the API returns it, with any extra labels and annotations."""
+    from vcluster_argocd_enroller.operator import build_argocd_secret
+
+    body = build_argocd_secret(name, namespace, vcluster_secret())
+    metadata = client.V1ObjectMeta(labels={**body["metadata"]["labels"], **(labels or {})}, annotations=annotations)
+    return client.V1Secret(metadata=metadata, data=body["data"])
+
+
+def serve_secrets(mock_core, secrets):
+    """Make read_namespaced_secret answer from a {(namespace, name): secret} mapping, and 404 otherwise."""
+
+    def read(name, namespace):
+        try:
+            return secrets[(namespace, name)]
+        except KeyError:
+            raise ApiException(status=404, reason="Not Found") from None
+
+    mock_core.read_namespaced_secret.side_effect = read
+
+
 def vcluster_workload(name, namespace, replicas, ready, annotations=None):
     """Create a mock vCluster StatefulSet or Deployment, as far as `check` looks at it."""
     workload = Mock(metadata=client.V1ObjectMeta(name=name, namespace=namespace, annotations=annotations))
@@ -162,6 +183,35 @@ class TestRun:
         assert bound.arguments["health_port"] == 9090
 
 
+class TestClientConfiguration:
+    """Test how the commands find the cluster."""
+
+    def test_falls_back_to_the_kubeconfig_outside_a_cluster(self, core_v1):
+        from kubernetes import config
+
+        with (
+            patch("kubernetes.config.load_incluster_config", side_effect=config.ConfigException("not in a pod")),
+            patch("kubernetes.config.load_kube_config") as load_kube_config,
+        ):
+            cli.unenroll("my-cluster", "team-a", confirm=True)
+
+        load_kube_config.assert_called_once_with()
+
+    def test_no_configuration_exits(self, core_v1, capsys):
+        from kubernetes import config
+
+        with (
+            patch("kubernetes.config.load_incluster_config", side_effect=config.ConfigException("not in a pod")),
+            patch("kubernetes.config.load_kube_config", side_effect=config.ConfigException("no kubeconfig")),
+            pytest.raises(SystemExit) as exc,
+        ):
+            cli.unenroll("my-cluster", "team-a", confirm=True)
+
+        assert exc.value.code == 1
+        assert "no kubeconfig" in capsys.readouterr().out
+        core_v1.read_namespaced_secret.assert_not_called()
+
+
 class TestCheck:
     """Test the enrollment overview."""
 
@@ -179,6 +229,14 @@ class TestCheck:
             yield mock_apps
 
     def test_lists_statefulset_and_deployment_vclusters(self, core_v1, apps_v1, capsys):
+        serve_secrets(
+            core_v1,
+            {
+                ("team-a", "vc-stateful"): vcluster_secret(),
+                ("gitops", "vcluster-team-a-stateful"): enrolled_secret("stateful", "team-a"),
+            },
+        )
+
         cli.check()
 
         apps_v1.list_stateful_set_for_all_namespaces.assert_called_once_with(label_selector="app=vcluster")
@@ -186,8 +244,25 @@ class TestCheck:
         core_v1.read_namespaced_secret.assert_any_call(name="vcluster-team-a-stateful", namespace="gitops")
         core_v1.read_namespaced_secret.assert_any_call(name="vcluster-team-b-stateless", namespace="gitops")
         output = capsys.readouterr().out
-        assert "stateful" in output and "1/1" in output
-        assert "stateless" in output and "0/2" in output
+        rows = {line.split()[3]: line.split()[5:] for line in output.splitlines() if "team-" in line}
+        assert rows["stateful"] == ["1/1", "│", "Y", "│", "Y", "│"]
+        assert rows["stateless"] == ["0/2", "│", "N", "│", "N", "│"]
+
+    def test_secret_of_something_else_is_not_an_enrollment(self, core_v1, apps_v1, capsys):
+        """Two vClusters can map to one secret name: team-a/stateful and team/a-stateful."""
+        serve_secrets(core_v1, {("gitops", "vcluster-team-a-stateful"): enrolled_secret("a-stateful", "team")})
+
+        cli.check()
+
+        assert capsys.readouterr().out.count("N (name taken)") == 1
+
+    def test_failed_lookup_is_not_reported_as_missing(self, core_v1, apps_v1, capsys):
+        core_v1.read_namespaced_secret.side_effect = ApiException(status=403, reason="Forbidden")
+
+        cli.check()
+
+        # Both secrets of both vClusters
+        assert capsys.readouterr().out.count("? (403 Forbidden)") == 4
 
     def test_opted_out_vcluster_is_marked(self, core_v1, apps_v1, capsys):
         opted_out = vcluster_workload(
@@ -211,13 +286,13 @@ class TestEnroll:
     """Test manual enrollment."""
 
     def test_creates_secret_in_configured_argocd_namespace(self, core_v1):
-        core_v1.read_namespaced_secret.side_effect = [ApiException(status=404), vcluster_secret()]
+        serve_secrets(core_v1, {("team-a", "vc-my-cluster"): vcluster_secret()})
 
         cli.enroll("my-cluster", "team-a")
 
-        kwargs = core_v1.create_namespaced_secret.call_args.kwargs
-        assert kwargs["namespace"] == "gitops"
-        assert kwargs["body"]["metadata"] == {
+        namespace, body = core_v1.create_namespaced_secret.call_args[0]
+        assert namespace == "gitops"
+        assert body["metadata"] == {
             "name": "vcluster-team-a-my-cluster",
             "namespace": "gitops",
             "labels": {
@@ -227,16 +302,16 @@ class TestEnroll:
                 "vcluster-argocd-enroller/name": "my-cluster",
             },
         }
-        assert base64.b64decode(kwargs["body"]["data"]["name"]).decode("utf-8") == "team-a-my-cluster"
-        server = base64.b64decode(kwargs["body"]["data"]["server"]).decode("utf-8")
+        assert base64.b64decode(body["data"]["name"]).decode("utf-8") == "team-a-my-cluster"
+        server = base64.b64decode(body["data"]["server"]).decode("utf-8")
         assert server == "https://my-cluster.team-a"
 
     def test_labels_and_project_are_set(self, core_v1):
-        core_v1.read_namespaced_secret.side_effect = [ApiException(status=404), vcluster_secret()]
+        serve_secrets(core_v1, {("team-a", "vc-my-cluster"): vcluster_secret()})
 
         cli.enroll("my-cluster", "team-a", label=["env=dev", "example.com/team=payments"], project="payments")
 
-        body = core_v1.create_namespaced_secret.call_args.kwargs["body"]
+        body = core_v1.create_namespaced_secret.call_args[0][1]
         assert body["metadata"]["labels"]["env"] == "dev"
         assert body["metadata"]["labels"]["example.com/team"] == "payments"
         assert body["metadata"]["annotations"] == {"vcluster-argocd-enroller/copied-labels": "env,example.com/team"}
@@ -252,10 +327,13 @@ class TestEnroll:
         core_v1.create_namespaced_secret.assert_not_called()
 
     def test_already_enrolled_is_left_alone(self, core_v1):
+        serve_secrets(core_v1, {("gitops", "vcluster-team-a-my-cluster"): enrolled_secret("my-cluster", "team-a")})
+
         cli.enroll("my-cluster", "team-a")
 
         core_v1.read_namespaced_secret.assert_called_once_with(name="vcluster-team-a-my-cluster", namespace="gitops")
         core_v1.create_namespaced_secret.assert_not_called()
+        core_v1.replace_namespaced_secret.assert_not_called()
 
     def test_failed_enrollment_check_is_not_treated_as_missing(self, core_v1):
         core_v1.read_namespaced_secret.side_effect = ApiException(status=403, reason="Forbidden")
@@ -267,18 +345,62 @@ class TestEnroll:
         core_v1.create_namespaced_secret.assert_not_called()
 
     def test_force_replaces_existing_secret(self, core_v1):
-        core_v1.read_namespaced_secret.return_value = vcluster_secret()
-        core_v1.create_namespaced_secret.side_effect = ApiException(status=409, reason="Conflict")
+        """As the operator does it: what something else put on the secret stays, labels no longer asked for go."""
+        existing = enrolled_secret(
+            "my-cluster",
+            "team-a",
+            labels={"env": "dev", "added-by": "someone"},
+            annotations={"vcluster-argocd-enroller/copied-labels": "env", "note": "kept"},
+        )
+        serve_secrets(
+            core_v1,
+            {
+                ("team-a", "vc-my-cluster"): vcluster_secret(),
+                ("gitops", "vcluster-team-a-my-cluster"): existing,
+            },
+        )
 
-        cli.enroll("my-cluster", "team-a", force=True)
+        cli.enroll("my-cluster", "team-a", force=True, label=["tier=gold"])
 
-        kwargs = core_v1.replace_namespaced_secret.call_args.kwargs
-        assert kwargs["name"] == "vcluster-team-a-my-cluster"
-        assert kwargs["namespace"] == "gitops"
+        name, namespace, body = core_v1.replace_namespaced_secret.call_args[0]
+        assert (name, namespace) == ("vcluster-team-a-my-cluster", "gitops")
+        assert body["metadata"]["labels"]["added-by"] == "someone"
+        assert body["metadata"]["labels"]["tier"] == "gold"
+        assert "env" not in body["metadata"]["labels"]
+        assert body["metadata"]["annotations"] == {"vcluster-argocd-enroller/copied-labels": "tier", "note": "kept"}
+        core_v1.create_namespaced_secret.assert_not_called()
         core_v1.delete_namespaced_secret.assert_not_called()
 
+    @pytest.mark.parametrize("force", [False, True])
+    def test_secret_of_something_else_is_never_overwritten(self, core_v1, capsys, force):
+        """Two vClusters can map to one secret name: team-a/my-cluster and team/a-my-cluster."""
+        serve_secrets(
+            core_v1,
+            {
+                ("team-a", "vc-my-cluster"): vcluster_secret(),
+                ("gitops", "vcluster-team-a-my-cluster"): enrolled_secret("a-my-cluster", "team"),
+            },
+        )
+
+        with pytest.raises(SystemExit) as exc:
+            cli.enroll("my-cluster", "team-a", force=force)
+
+        assert exc.value.code == 1
+        assert "not overwriting it" in capsys.readouterr().out
+        core_v1.create_namespaced_secret.assert_not_called()
+        core_v1.replace_namespaced_secret.assert_not_called()
+
+    def test_failed_write_exits(self, core_v1):
+        serve_secrets(core_v1, {("team-a", "vc-my-cluster"): vcluster_secret()})
+        core_v1.create_namespaced_secret.side_effect = ApiException(status=403, reason="Forbidden")
+
+        with pytest.raises(SystemExit) as exc:
+            cli.enroll("my-cluster", "team-a")
+
+        assert exc.value.code == 1
+
     def test_malformed_vcluster_secret_exits(self, core_v1):
-        core_v1.read_namespaced_secret.side_effect = [ApiException(status=404), Mock(data={})]
+        serve_secrets(core_v1, {("team-a", "vc-my-cluster"): Mock(data={})})
 
         with pytest.raises(SystemExit) as exc:
             cli.enroll("my-cluster", "team-a")
@@ -291,14 +413,53 @@ class TestUnenroll:
     """Test manual removal."""
 
     def test_deletes_secret_in_configured_argocd_namespace(self, core_v1):
+        serve_secrets(core_v1, {("gitops", "vcluster-team-a-my-cluster"): enrolled_secret("my-cluster", "team-a")})
+
         cli.unenroll("my-cluster", "team-a", confirm=True)
 
         core_v1.delete_namespaced_secret.assert_called_once_with(name="vcluster-team-a-my-cluster", namespace="gitops")
 
-    def test_missing_secret_is_not_an_error(self, core_v1):
-        core_v1.delete_namespaced_secret.side_effect = ApiException(status=404)
+    def test_secret_written_by_1x_is_deleted_too(self, core_v1):
+        legacy = enrolled_secret("my-cluster", "team-a")
+        legacy.metadata.labels = {"argocd.argoproj.io/secret-type": "cluster", "vcluster-operator": "true"}
+        legacy.data["server"] = base64.b64encode(b"https://my-cluster.team-a.svc.cluster.local").decode("utf-8")
+        serve_secrets(
+            core_v1,
+            {
+                ("gitops", "vcluster-team-a-my-cluster"): enrolled_secret("my-cluster", "team-a"),
+                ("gitops", "vcluster-my-cluster"): legacy,
+            },
+        )
 
         cli.unenroll("my-cluster", "team-a", confirm=True)
+
+        deleted = [call.kwargs["name"] for call in core_v1.delete_namespaced_secret.call_args_list]
+        assert deleted == ["vcluster-team-a-my-cluster", "vcluster-my-cluster"]
+
+    def test_secret_of_something_else_is_left_alone(self, core_v1, capsys):
+        """Two vClusters can map to one secret name: team-a/my-cluster and team/a-my-cluster."""
+        serve_secrets(core_v1, {("gitops", "vcluster-team-a-my-cluster"): enrolled_secret("a-my-cluster", "team")})
+
+        cli.unenroll("my-cluster", "team-a", confirm=True)
+
+        core_v1.delete_namespaced_secret.assert_not_called()
+        assert "not found in ArgoCD" in capsys.readouterr().out
+
+    def test_missing_secret_is_not_an_error(self, core_v1):
+        serve_secrets(core_v1, {})
+
+        cli.unenroll("my-cluster", "team-a", confirm=True)
+
+        core_v1.delete_namespaced_secret.assert_not_called()
+
+    def test_failed_removal_exits(self, core_v1):
+        serve_secrets(core_v1, {("gitops", "vcluster-team-a-my-cluster"): enrolled_secret("my-cluster", "team-a")})
+        core_v1.delete_namespaced_secret.side_effect = ApiException(status=403, reason="Forbidden")
+
+        with pytest.raises(SystemExit) as exc:
+            cli.unenroll("my-cluster", "team-a", confirm=True)
+
+        assert exc.value.code == 1
 
 
 class TestVerify:

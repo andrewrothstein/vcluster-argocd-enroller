@@ -119,12 +119,17 @@ that shows up.
 
 The operator also provides CLI subcommands for manual management:
 
-- **`check`** -- Show vCluster enrollment status across namespaces
+- **`check`** -- Show vCluster enrollment status across namespaces. `N (name taken)` marks a vCluster whose ArgoCD
+  secret name is held by something else, `? (...)` a lookup that failed
 - **`enroll <name> <namespace> [--label key=value]... [--project name]`** -- Manually enroll a vCluster in ArgoCD.
   A running operator re-syncs the enrollment from the vCluster's annotations, so set labels and the project there
-  when the operator is in charge
+  when the operator is in charge. `--force` re-writes an existing enrollment
 - **`unenroll <name> <namespace> --confirm`** -- Remove a vCluster from ArgoCD (a running operator enrolls it again
   on its next re-sync, for as long as the vCluster exists)
+
+`enroll` and `unenroll` write and delete the way the operator does: neither touches an ArgoCD secret that is not
+the enrollment of the vCluster named, `--force` or not.
+
 - **`verify <name> <namespace>`** -- Connect to the vCluster with the credentials enrolled in ArgoCD. Run it inside
   the cluster, where the vCluster's Service resolves
 

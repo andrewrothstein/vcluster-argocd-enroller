@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `enroll --force` and `unenroll` no longer overwrite or delete an ArgoCD secret that is not the enrollment of
+  the vCluster named (two vClusters can map to one secret name, `a-b`/`c` and `a`/`b-c` for example). Both now go
+  through the operator's own sync and removal, so `enroll --force` also keeps the labels and annotations something
+  else put on the secret, and `unenroll` also removes the secret 1.x wrote
+- `check` shows `N` only for a secret that is missing: a failed lookup shows as `? (403 Forbidden)`, and an ArgoCD
+  secret of the right name that belongs to something else as `N (name taken)` rather than `Y`
+- An empty `SERVER_URL`, `RESYNC_INTERVAL` or `ARGOCD_NAMESPACE` (an emptied `operator.serverURL` or
+  `operator.resyncInterval` chart value) falls back to the default. The operator used to crash at start on an
+  empty `RESYNC_INTERVAL`, and to enroll every vCluster with an empty server address on an empty `SERVER_URL`
+- A Kubernetes client that cannot be configured is retried rather than raised as a permanent error, which would
+  have ended the vCluster's re-sync timer and has no place in the delete handler
+- The CLI subcommands exit with a message, not a traceback, when there is no cluster configuration to use
+
 ## [2.2.0] - 2026-11-12
 
 ### Added
