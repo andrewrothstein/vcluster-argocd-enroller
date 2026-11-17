@@ -126,7 +126,8 @@ The operator expects:
 - vCluster secrets named: `vc-{vcluster-name}`
 - vCluster StatefulSets or Deployments labeled with: `app=vcluster`
 
-Environment variables (the Helm chart sets them from its values):
+Environment variables (the Helm chart sets them from its values). An empty `ARGOCD_NAMESPACE`, `SERVER_URL` or
+`RESYNC_INTERVAL` counts as unset:
 
 | Variable | Meaning | Default |
 | -------- | ------- | ------- |

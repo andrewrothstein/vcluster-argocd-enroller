@@ -783,6 +783,45 @@ class TestEnrollmentAnnotations:
         mock_core.delete_namespaced_secret.assert_not_called()
 
 
+class TestConfiguration:
+    """Test how the operator reads its settings and finds the cluster."""
+
+    @pytest.mark.parametrize(
+        "value,expected",
+        [(None, "300"), ("", "300"), ("  ", "300"), ("60", "60"), (" 60 ", "60")],
+        ids=["unset", "empty", "blank", "set", "padded"],
+    )
+    def test_empty_setting_falls_back_to_the_default(self, monkeypatch, value, expected):
+        """The chart always sets these variables, so an emptied value arrives as an empty string."""
+        from vcluster_argocd_enroller.operator import _env
+
+        if value is None:
+            monkeypatch.delenv("RESYNC_INTERVAL", raising=False)
+        else:
+            monkeypatch.setenv("RESYNC_INTERVAL", value)
+
+        assert _env("RESYNC_INTERVAL", "300") == expected
+
+    @pytest.mark.parametrize("handler", ["vcluster_created", "vcluster_resync", "vcluster_deleted"])
+    def test_unconfigurable_client_is_retried_not_given_up_on(self, monkeypatch, handler):
+        """A PermanentError would end the re-sync timer, and must never come out of the delete handler."""
+        from kubernetes import config
+
+        from vcluster_argocd_enroller import operator
+
+        def no_config():
+            raise config.ConfigException("no configuration")
+
+        monkeypatch.setattr(config, "load_incluster_config", no_config)
+        monkeypatch.setattr(config, "load_kube_config", no_config)
+
+        with pytest.raises(kopf.TemporaryError) as exc_info:
+            getattr(operator, handler)(**handler_args())
+
+        assert not isinstance(exc_info.value, kopf.PermanentError)
+        assert operator._k8s_configured is False
+
+
 class TestUtilityFunctions:
     """Test utility functions."""
 

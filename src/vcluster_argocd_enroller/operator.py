@@ -10,14 +10,20 @@ import kopf
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
 
-ARGOCD_NAMESPACE = os.getenv("ARGOCD_NAMESPACE", "argocd")
+
+def _env(name: str, default: str) -> str:
+    """Read a setting from the environment. One that is set but empty counts as unset: the chart always sets these."""
+    return os.getenv(name, "").strip() or default
+
+
+ARGOCD_NAMESPACE = _env("ARGOCD_NAMESPACE", "argocd")
 # Where ArgoCD reaches a vCluster. The certificate vcluster serves covers <name> and <name>.<namespace>,
 # but not <name>.<namespace>.svc.cluster.local, unless that is added to its controlPlane.proxy.extraSANs.
-SERVER_URL = os.getenv("SERVER_URL", "https://{name}.{namespace}")
+SERVER_URL = _env("SERVER_URL", "https://{name}.{namespace}")
 # What enrollments pointed at before SERVER_URL existed.
 LEGACY_SERVER_URL = "https://{name}.{namespace}.svc.cluster.local"
 # Seconds between re-syncs of each vCluster: vcluster rotates vc-<name> without touching its workload.
-RESYNC_INTERVAL = float(os.getenv("RESYNC_INTERVAL", "300"))
+RESYNC_INTERVAL = float(_env("RESYNC_INTERVAL", "300"))
 # Attempts at removing the ArgoCD secret before a deleted vCluster is let go anyway.
 DELETE_RETRIES = 10
 
@@ -55,20 +61,28 @@ _core_v1_api: client.CoreV1Api | None = None
 _apps_v1_api: client.AppsV1Api | None = None
 
 
+class NotOwnedError(Exception):
+    """An ArgoCD secret of the wanted name exists, and is not the enrollment of the vCluster asking for it."""
+
+
+def load_k8s_config() -> None:
+    """Configure the Kubernetes client from the pod's service account, or from the kubeconfig outside a cluster."""
+    try:
+        config.load_incluster_config()
+    except config.ConfigException:
+        config.load_kube_config()
+
+
 def _ensure_k8s() -> tuple[client.CoreV1Api, client.AppsV1Api]:
     """Lazy-init Kubernetes clients on first use."""
     global _k8s_configured, _core_v1_api, _apps_v1_api
     if not _k8s_configured:
         try:
-            if os.getenv("KUBERNETES_SERVICE_HOST"):
-                logger.debug("Running in cluster, using in-cluster config")
-                config.load_incluster_config()
-            else:
-                logger.debug("Running locally, using kubeconfig")
-                config.load_kube_config()
+            load_k8s_config()
         except config.ConfigException as e:
             logger.error(f"Failed to load kubernetes config: {e}")
-            raise kopf.PermanentError("Could not configure kubernetes client")
+            # Retried, never a PermanentError: that would end the re-sync timer, and has no place in a delete handler.
+            raise kopf.TemporaryError("Could not configure kubernetes client", delay=60)
         _core_v1_api = client.CoreV1Api()
         _apps_v1_api = client.AppsV1Api()
         _k8s_configured = True
@@ -215,7 +229,7 @@ def build_argocd_secret(
     }
 
 
-def _read_argocd_secret(core_v1_api: client.CoreV1Api, name: str) -> client.V1Secret | None:
+def read_argocd_secret(core_v1_api: client.CoreV1Api, name: str) -> client.V1Secret | None:
     """Read a secret from the ArgoCD namespace, or None when there is none."""
     try:
         return core_v1_api.read_namespaced_secret(name=name, namespace=ARGOCD_NAMESPACE)
@@ -253,7 +267,7 @@ def _in_sync(existing: client.V1Secret, desired: dict) -> bool:
 
 def _delete_if_owned(core_v1_api: client.CoreV1Api, name: str, namespace: str, vcluster_name: str) -> bool:
     """Delete an ArgoCD secret unless it is missing or belongs to something else."""
-    secret = _read_argocd_secret(core_v1_api, name)
+    secret = read_argocd_secret(core_v1_api, name)
     if secret is None:
         return False
     if not owns(secret, namespace, vcluster_name):
@@ -267,11 +281,46 @@ def _delete_if_owned(core_v1_api: client.CoreV1Api, name: str, namespace: str, v
     return True
 
 
-def _remove_enrollment(core_v1_api: client.CoreV1Api, namespace: str, vcluster_name: str) -> None:
-    """Delete the ArgoCD secrets this operator wrote for a vCluster, under the current name and the 1.x one."""
+def sync_enrollment(core_v1_api: client.CoreV1Api, namespace: str, vcluster_name: str, desired: dict) -> str | None:
+    """Create a vCluster's ArgoCD secret, or replace the one that differs, and drop the one 1.x wrote for it.
+
+    Returns what was done to the secret, "Created" or "Updated", or None when it was up to date already.
+    Raises NotOwnedError rather than touch a secret that is not this vCluster's enrollment.
+    """
+    name = desired["metadata"]["name"]
+    done = None
+    existing = read_argocd_secret(core_v1_api, name)
+    if existing is None:
+        core_v1_api.create_namespaced_secret(ARGOCD_NAMESPACE, cast(client.V1Secret, desired))
+        done = "Created"
+    elif not owns(existing, namespace, vcluster_name):
+        raise NotOwnedError(f"ArgoCD secret {name} exists but is not {namespace}/{vcluster_name}'s")
+    elif not _in_sync(existing, desired := _keeping_foreign_metadata(existing, desired)):
+        core_v1_api.replace_namespaced_secret(name, ARGOCD_NAMESPACE, cast(client.V1Secret, desired))
+        done = "Updated"
+    if done:
+        logger.info(f"{done} ArgoCD cluster secret {name} for vcluster {namespace}/{vcluster_name}")
+    else:
+        logger.debug(f"ArgoCD cluster secret {name} is up to date")
+
+    # Enrollments made before the namespace was part of the name move over to the new one.
+    legacy_secret_name = legacy_ar_secret_name(vcluster_name)
+    if _delete_if_owned(core_v1_api, legacy_secret_name, namespace, vcluster_name):
+        logger.info(f"Removed legacy ArgoCD cluster secret {legacy_secret_name}, replaced by {name}")
+    return done
+
+
+def remove_enrollment(core_v1_api: client.CoreV1Api, namespace: str, vcluster_name: str) -> list[str]:
+    """Delete the ArgoCD secrets this operator wrote for a vCluster, under the current name and the 1.x one.
+
+    Returns the names of the secrets deleted. One that belongs to something else is left alone.
+    """
+    deleted = []
     for secret_name in (ar_secret_name(namespace, vcluster_name), legacy_ar_secret_name(vcluster_name)):
         if _delete_if_owned(core_v1_api, secret_name, namespace, vcluster_name):
             logger.info(f"Deleted ArgoCD cluster secret {secret_name} for {namespace}/{vcluster_name}")
+            deleted.append(secret_name)
+    return deleted
 
 
 def _lives_on(apps_v1_api: client.AppsV1Api, deleted_plural: str, name: str, namespace: str) -> bool:
@@ -311,7 +360,7 @@ def handle_vcluster_enrollment(
     if opted_out(annotations):
         logger.debug(f"Not enrolling {namespace}/{vcluster_name}: its workload is annotated {ENROLL_ANNOTATION}=false")
         try:
-            _remove_enrollment(core_v1_api, namespace, vcluster_name)
+            remove_enrollment(core_v1_api, namespace, vcluster_name)
         except ApiException as e:
             logger.error(f"API error removing the enrollment of {namespace}/{vcluster_name}: {e.status} {e.reason}")
             raise kopf.TemporaryError(
@@ -355,27 +404,12 @@ def handle_vcluster_enrollment(
     argocd_secret_name = ar_secret_name(namespace, vcluster_name)
 
     try:
-        existing = _read_argocd_secret(core_v1_api, argocd_secret_name)
-        if existing is None:
-            core_v1_api.create_namespaced_secret(ARGOCD_NAMESPACE, cast(client.V1Secret, secret_body))
-            logger.info(f"Created ArgoCD cluster secret {argocd_secret_name} for vcluster {namespace}/{vcluster_name}")
-        elif not owns(existing, namespace, vcluster_name):
-            logger.error(f"ArgoCD secret {argocd_secret_name} exists but is not {namespace}/{vcluster_name}'s")
-            raise kopf.TemporaryError(
-                f"ArgoCD secret {argocd_secret_name} belongs to something else; not overwriting it", delay=60
-            )
-        elif _in_sync(existing, secret_body := _keeping_foreign_metadata(existing, secret_body)):
-            logger.debug(f"ArgoCD cluster secret {argocd_secret_name} is up to date")
-        else:
-            core_v1_api.replace_namespaced_secret(
-                argocd_secret_name, ARGOCD_NAMESPACE, cast(client.V1Secret, secret_body)
-            )
-            logger.info(f"Updated ArgoCD cluster secret {argocd_secret_name} for vcluster {namespace}/{vcluster_name}")
-
-        # Enrollments made before the namespace was part of the name move over to the new one.
-        legacy_secret_name = legacy_ar_secret_name(vcluster_name)
-        if _delete_if_owned(core_v1_api, legacy_secret_name, namespace, vcluster_name):
-            logger.info(f"Removed legacy ArgoCD cluster secret {legacy_secret_name}, replaced by {argocd_secret_name}")
+        sync_enrollment(core_v1_api, namespace, vcluster_name, secret_body)
+    except NotOwnedError as e:
+        logger.error(str(e))
+        raise kopf.TemporaryError(
+            f"ArgoCD secret {argocd_secret_name} belongs to something else; not overwriting it", delay=60
+        )
     except ApiException as e:
         logger.error(f"API error syncing ArgoCD secret {argocd_secret_name}: {e.status} {e.reason}")
         raise kopf.TemporaryError(f"Failed to sync ArgoCD secret {argocd_secret_name}: {e.status} {e.reason}", delay=60)
@@ -445,7 +479,7 @@ def vcluster_deleted(name, namespace, resource, **kwargs):
         if _lives_on(apps_v1_api, resource.plural, name, namespace):
             logger.info(f"Keeping the enrollment of {namespace}/{vcluster_name}: only its {kind} is replaced")
             return
-        _remove_enrollment(core_v1_api, namespace, vcluster_name)
+        remove_enrollment(core_v1_api, namespace, vcluster_name)
     except ApiException as e:
         logger.error(f"Failed to delete ArgoCD cluster secret for {namespace}/{vcluster_name}: {e.status} {e.reason}")
         # Never a PermanentError here. kopf retries DELETE_RETRIES times, then releases the finalizer anyway.
