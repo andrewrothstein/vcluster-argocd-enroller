@@ -96,6 +96,14 @@ operator:
   # and restores an ArgoCD secret that was changed or removed; it writes nothing when all is in sync.
   resyncInterval: 300
 
+  # The label keys vClusters may ask for with the vcluster-argocd-enroller/labels annotation, and the
+  # projects they may ask for with vcluster-argocd-enroller/project. `*` matches anything: "example.com/*".
+  # Empty allows all. Whoever can edit a vCluster's workload sets these annotations, so list what is safe
+  # for a tenant to choose when ApplicationSets select clusters by label. What is not listed is ignored,
+  # with a warning in the operator's log.
+  allowedLabels: []
+  allowedProjects: []
+
 # Additional environment variables for the operator
 env: []
   # - name: EXAMPLE_VAR

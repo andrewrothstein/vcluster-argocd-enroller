@@ -67,6 +67,10 @@ Every `key=value` in that annotation becomes a label on the cluster secret. The 
 (`matchLabels`, `matchExpressions`) and template with it (`{{index .metadata.labels "env"}}`). Change the annotation
 and the labels follow; `bootstrap.yaml` then adds or drops Applications to match.
 
+Whoever can edit a vCluster's workload can change that annotation. Where that is not only you, limit what it may
+ask for with the enroller's `operator.allowedLabels` and `operator.allowedProjects`
+([README](../../README.md#limiting-what-a-vcluster-can-ask-for)).
+
 Two more annotations work the same way: `vcluster-argocd-enroller/project` makes the cluster
 [project-scoped](https://argo-cd.readthedocs.io/en/stable/user-guide/projects/#project-scoped-repositories-and-clusters)
 (the cluster generator exposes it as `{{.project}}`), and `vcluster-argocd-enroller/enroll: "false"` keeps a

@@ -110,6 +110,7 @@ tasks:
         --set networkPolicy.enabled=true --set operator.logLevel=DEBUG --set readinessProbe.initialDelaySeconds=5 --set readinessProbe.periodSeconds=5
         --set livenessProbe.initialDelaySeconds=15
         --set replicaCount=2 --set leaderElection.enabled=true --set operator.resyncInterval=15
+        --set 'operator.allowedLabels={env,tier}' --set 'operator.allowedProjects={team-*}'
 
   k3d-smoke:
     desc: "Verify the operator is Ready under its NetworkPolicy with one active replica, then enroll fake vClusters and check the ArgoCD secrets through create, migration, re-sync, labels and project, opt-out, a change of workload kind and delete"
@@ -133,6 +134,10 @@ tasks:
       - kubectl -n argocd wait --for=jsonpath='{.metadata.labels.tier}'=gold secret/vcluster-team-b-smoke --timeout=60s
       - kubectl -n argocd get secret vcluster-team-b-smoke -o jsonpath='{.metadata.labels.env}' | grep -qx dev
       - kubectl -n argocd get secret vcluster-team-b-smoke -o jsonpath='{.data.project}' | base64 -d | grep -qx team-b
+      # A label key or project outside operator.allowedLabels / allowedProjects is not taken over
+      - kubectl -n vcluster-system annotate statefulset smoke vcluster-argocd-enroller/labels=env=dev,owner=mallory vcluster-argocd-enroller/project=platform
+      - kubectl -n argocd wait --for=jsonpath='{.metadata.labels.env}'=dev secret/vcluster-vcluster-system-smoke --timeout=60s
+      - kubectl -n argocd get secret vcluster-vcluster-system-smoke -o jsonpath='{.metadata.labels.owner}{.data.project}' | grep -c . | grep -qx 0
       # A label that is no longer asked for leaves the secret; one added by something else stays
       - kubectl -n argocd label secret vcluster-team-b-smoke added-by=someone-else
       - kubectl -n team-b annotate statefulset smoke --overwrite vcluster-argocd-enroller/labels=env=dev

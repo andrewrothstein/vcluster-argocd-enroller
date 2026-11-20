@@ -59,6 +59,10 @@ spec:
           value: {{ .Values.operator.logLevel | quote }}
         - name: RESYNC_INTERVAL
           value: {{ .Values.operator.resyncInterval | quote }}
+        - name: ALLOWED_LABELS
+          value: {{ join "," .Values.operator.allowedLabels | quote }}
+        - name: ALLOWED_PROJECTS
+          value: {{ join "," .Values.operator.allowedProjects | quote }}
         - name: HEALTH_PORT
           value: {{ .Values.networkPolicy.healthPort | quote }}
         {{- if .Values.leaderElection.enabled }}
