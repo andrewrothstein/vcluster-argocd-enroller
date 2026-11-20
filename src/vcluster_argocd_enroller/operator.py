@@ -3,7 +3,8 @@ import json
 import logging
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
+from fnmatch import fnmatchcase
 from typing import cast
 
 import kopf
@@ -16,6 +17,11 @@ def _env(name: str, default: str) -> str:
     return os.getenv(name, "").strip() or default
 
 
+def _env_list(name: str) -> tuple[str, ...]:
+    """Read a comma-separated setting from the environment."""
+    return tuple(filter(None, (entry.strip() for entry in os.getenv(name, "").split(","))))
+
+
 ARGOCD_NAMESPACE = _env("ARGOCD_NAMESPACE", "argocd")
 # Where ArgoCD reaches a vCluster. The certificate vcluster serves covers <name> and <name>.<namespace>,
 # but not <name>.<namespace>.svc.cluster.local, unless that is added to its controlPlane.proxy.extraSANs.
@@ -24,6 +30,10 @@ SERVER_URL = _env("SERVER_URL", "https://{name}.{namespace}")
 LEGACY_SERVER_URL = "https://{name}.{namespace}.svc.cluster.local"
 # Seconds between re-syncs of each vCluster: vcluster rotates vc-<name> without touching its workload.
 RESYNC_INTERVAL = float(_env("RESYNC_INTERVAL", "300"))
+# The label keys and the projects a vCluster's workload may ask for, as patterns in which `*` matches anything.
+# Empty allows them all. Whoever can edit a workload picks its annotations: these keep that to what is harmless.
+ALLOWED_LABELS = _env_list("ALLOWED_LABELS")
+ALLOWED_PROJECTS = _env_list("ALLOWED_PROJECTS")
 # Attempts at removing the ArgoCD secret before a deleted vCluster is let go anyway.
 DELETE_RETRIES = 10
 
@@ -151,20 +161,42 @@ def opted_out(annotations: Mapping[str, str]) -> bool:
     return annotations.get(ENROLL_ANNOTATION, "").strip().lower() == "false"
 
 
+def allowed(value: str, patterns: Collection[str]) -> bool:
+    """Tell whether a label key or project is one a workload may ask for: any is, unless patterns are given."""
+    return not patterns or any(fnmatchcase(value, pattern) for pattern in patterns)
+
+
 def wanted_labels(annotations: Mapping[str, str], vcluster: str) -> dict[str, str]:
     """Return the labels a vCluster's workload asks for on its ArgoCD secret.
 
-    An entry that cannot be a label is left out and reported: the vCluster is still enrolled without it.
+    An entry that cannot be a label, or whose key ALLOWED_LABELS does not allow, is left out and reported:
+    the vCluster is still enrolled without it.
     """
     labels = {}
     for entry in filter(str.strip, annotations.get(LABELS_ANNOTATION, "").split(",")):
         try:
             key, value = parse_label(entry)
+            if not allowed(key, ALLOWED_LABELS):
+                raise ValueError(f"{key!r} is not a label key workloads are allowed to set")
         except ValueError as e:
             logger.warning(f"Ignoring a label asked for by {vcluster} in {LABELS_ANNOTATION}: {e}")
         else:
             labels[key] = value
     return labels
+
+
+def wanted_project(annotations: Mapping[str, str], vcluster: str) -> str | None:
+    """Return the ArgoCD project a vCluster's workload asks to be scoped to.
+
+    One that ALLOWED_PROJECTS does not allow is reported: the vCluster is still enrolled, without a project.
+    """
+    project = annotations.get(PROJECT_ANNOTATION, "").strip()
+    if project and not allowed(project, ALLOWED_PROJECTS):
+        logger.warning(
+            f"Ignoring the project asked for by {vcluster} in {PROJECT_ANNOTATION}: {project!r} is not allowed"
+        )
+        return None
+    return project or None
 
 
 def owns(secret: client.V1Secret, namespace: str, vcluster_name: str) -> bool:
@@ -392,7 +424,7 @@ def handle_vcluster_enrollment(
             namespace,
             vc_secret,
             labels=wanted_labels(annotations, f"{namespace}/{vcluster_name}"),
-            project=annotations.get(PROJECT_ANNOTATION, "").strip() or None,
+            project=wanted_project(annotations, f"{namespace}/{vcluster_name}"),
         )
     except KeyError as e:
         # Retried rather than given up on: the secret can be completed (or fixed) later.

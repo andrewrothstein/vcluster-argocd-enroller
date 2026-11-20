@@ -55,6 +55,8 @@ Key Helm values:
 | `operator.vclusterNamespace` | Namespace where the operator is deployed (vClusters are watched cluster-wide) | `vcluster-system` |
 | `operator.serverURL` | Address ArgoCD reaches each vCluster at (`{name}` and `{namespace}` are replaced) | `https://{name}.{namespace}` |
 | `operator.resyncInterval` | Seconds between re-syncs of each vCluster | `300` |
+| `operator.allowedLabels` | Label keys vClusters may ask for with the `labels` annotation; `*` matches anything, empty allows all | `[]` |
+| `operator.allowedProjects` | Projects vClusters may ask for with the `project` annotation; `*` matches anything, empty allows all | `[]` |
 | `operator.logLevel` | Log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) | `INFO` |
 | `replicaCount` | Operator replicas; more than one needs `leaderElection.enabled` | `1` |
 | `leaderElection.enabled` | Run one active replica and keep the others on standby | `false` |
@@ -97,6 +99,24 @@ controlPlane:
 ```
 
 or on a running vCluster with `kubectl annotate`. Either way the change reaches ArgoCD right away.
+
+### Limiting what a vCluster can ask for
+
+Whoever can edit a vCluster's workload sets these annotations. If your ApplicationSets select clusters by label,
+a tenant who labels their vCluster `env=prod` receives whatever is deployed to `env=prod`. The chart's
+`operator.allowedLabels` and `operator.allowedProjects` say which label keys and which projects the annotations
+may ask for:
+
+```yaml
+operator:
+  allowedLabels: [team, "example.com/*"]
+  allowedProjects: ["team-*"]
+```
+
+`*` matches anything, and an empty list (the default) allows everything. A label or project that is not allowed is
+ignored, with a warning in the operator's log; the vCluster is still enrolled. The lists limit label keys, not
+values: allow only keys whose value a tenant may choose freely. They do not apply to `enroll --label` and
+`--project`, which need write access to the ArgoCD namespace anyway.
 
 - Labels and a project that are no longer asked for are removed again. Labels and annotations that something else
   put on the cluster secret are kept

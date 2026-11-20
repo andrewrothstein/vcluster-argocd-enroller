@@ -783,6 +783,99 @@ class TestEnrollmentAnnotations:
         mock_core.delete_namespaced_secret.assert_not_called()
 
 
+class TestAllowlists:
+    """Test limiting what a workload's annotations may ask for."""
+
+    ANNOTATIONS = {
+        "vcluster-argocd-enroller/labels": "env=dev,example.com/team=payments,owner=mallory",
+        "vcluster-argocd-enroller/project": "team-payments",
+    }
+
+    def enroll(self, k8s_mocked):
+        from vcluster_argocd_enroller import operator
+
+        mock_core, _ = k8s_mocked
+        serve_secrets(mock_core, {("vcluster-test", "vc-test-cluster"): create_vcluster_secret()})
+        operator.vcluster_created(**handler_args(annotations=self.ANNOTATIONS))
+        return mock_core.create_namespaced_secret.call_args[0][1]
+
+    def test_everything_is_allowed_by_default(self, k8s_mocked):
+        body = self.enroll(k8s_mocked)
+
+        assert {"env", "example.com/team", "owner"} <= body["metadata"]["labels"].keys()
+        assert base64.b64decode(body["data"]["project"]).decode("utf-8") == "team-payments"
+
+    def test_label_keys_outside_the_allowlist_are_left_out(self, k8s_mocked, monkeypatch, caplog):
+        from vcluster_argocd_enroller import operator
+
+        monkeypatch.setattr(operator, "ALLOWED_LABELS", ("env", "example.com/*"))
+
+        with caplog.at_level("WARNING"):
+            body = self.enroll(k8s_mocked)
+
+        assert body["metadata"]["labels"]["env"] == "dev"
+        assert body["metadata"]["labels"]["example.com/team"] == "payments"
+        assert "owner" not in body["metadata"]["labels"]
+        assert body["metadata"]["annotations"] == {"vcluster-argocd-enroller/copied-labels": "env,example.com/team"}
+        assert [r.getMessage() for r in caplog.records if "'owner' is not a label key" in r.getMessage()]
+
+    @pytest.mark.parametrize(
+        "patterns,project",
+        [(("team-*",), "team-payments"), (("team-payments", "other"), "team-payments"), (("platform",), None)],
+        ids=["pattern", "exact", "not-allowed"],
+    )
+    def test_project_outside_the_allowlist_is_left_out(self, k8s_mocked, monkeypatch, caplog, patterns, project):
+        from vcluster_argocd_enroller import operator
+
+        monkeypatch.setattr(operator, "ALLOWED_PROJECTS", patterns)
+
+        with caplog.at_level("WARNING"):
+            body = self.enroll(k8s_mocked)
+
+        enrolled = base64.b64decode(body["data"]["project"]).decode("utf-8") if "project" in body["data"] else None
+        assert enrolled == project
+        assert any("Ignoring the project" in r.getMessage() for r in caplog.records) == (project is None)
+
+    def test_disallowed_label_already_copied_is_removed(self, k8s_mocked, monkeypatch):
+        """Tightening the allowlist takes effect on vClusters enrolled before it."""
+        from vcluster_argocd_enroller import operator
+
+        mock_core, _ = k8s_mocked
+        monkeypatch.setattr(operator, "ALLOWED_LABELS", ("env",))
+        serve_secrets(
+            mock_core,
+            {
+                ("vcluster-test", "vc-test-cluster"): create_vcluster_secret(),
+                ("argocd", "vcluster-vcluster-test-test-cluster"): enrolled_secret(
+                    labels={"env": "dev", "owner": "mallory"}
+                ),
+            },
+        )
+
+        operator.vcluster_resync(
+            **handler_args(annotations={"vcluster-argocd-enroller/labels": "env=dev,owner=mallory"})
+        )
+
+        body = mock_core.replace_namespaced_secret.call_args[0][2]
+        assert "owner" not in body["metadata"]["labels"]
+        assert body["metadata"]["labels"]["env"] == "dev"
+
+    @pytest.mark.parametrize(
+        "value,expected",
+        [(None, ()), ("", ()), (" , ", ()), ("env", ("env",)), (" env , example.com/* ,", ("env", "example.com/*"))],
+        ids=["unset", "empty", "blank", "one", "several"],
+    )
+    def test_allowlist_is_read_from_a_comma_separated_variable(self, monkeypatch, value, expected):
+        from vcluster_argocd_enroller.operator import _env_list
+
+        if value is None:
+            monkeypatch.delenv("ALLOWED_LABELS", raising=False)
+        else:
+            monkeypatch.setenv("ALLOWED_LABELS", value)
+
+        assert _env_list("ALLOWED_LABELS") == expected
+
+
 class TestConfiguration:
     """Test how the operator reads its settings and finds the cluster."""
 

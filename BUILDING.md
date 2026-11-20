@@ -52,7 +52,7 @@ uv run vcluster-argocd-enroller unenroll my-vcluster vcluster-ns --confirm
 # Connect to a vCluster with the credentials enrolled in ArgoCD (from inside the cluster)
 vcluster-argocd-enroller verify my-vcluster vcluster-ns
 
-# Run with specific namespace watching
+# Run with specific namespace watching (not with --peering-name: leader election is cluster-wide)
 uv run vcluster-argocd-enroller --namespace my-namespace
 
 # Get help
@@ -134,6 +134,8 @@ Environment variables (the Helm chart sets them from its values). An empty `ARGO
 | `ARGOCD_NAMESPACE` | Namespace ArgoCD is installed in | `argocd` |
 | `SERVER_URL` | Address ArgoCD reaches a vCluster at; `{name}` and `{namespace}` are replaced | `https://{name}.{namespace}` |
 | `RESYNC_INTERVAL` | Seconds between re-syncs of each vCluster | `300` |
+| `ALLOWED_LABELS` | Comma-separated label keys workloads may ask for; `*` matches anything | unset: all |
+| `ALLOWED_PROJECTS` | Comma-separated projects workloads may ask for; `*` matches anything | unset: all |
 | `LOG_LEVEL` | `DEBUG`, `INFO`, `WARNING` or `ERROR` | `INFO` |
 | `HEALTH_PORT` | Port serving `/healthz` | `8080` |
 | `PEERING_NAME` | kopf peering object to run leader election in; unset means no peering | unset |
