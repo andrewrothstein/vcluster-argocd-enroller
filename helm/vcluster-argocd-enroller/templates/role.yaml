@@ -10,5 +10,6 @@ rules:
 # Write the per-vCluster cluster secret only in the ArgoCD namespace.
 - apiGroups: [""]
   resources: ["secrets"]
-  verbs: ["create", "update", "patch", "delete"]
+  # Written with server-side apply: a patch, which also needs create for a secret that is not there yet.
+  verbs: ["create", "patch", "delete"]
 {{- end }}

@@ -38,12 +38,32 @@ def k8s_mocked():
     mock_apps.read_namespaced_deployment.side_effect = ApiException(status=404)
     mock_apps.read_namespaced_stateful_set.side_effect = ApiException(status=404)
 
+    # Every write is a patch. The API answers an apply with the secret, at a new version when it changed.
+    mock_core.patch_namespaced_secret.return_value = api_secret(resource_version="2")
+
     # Pre-set the lazy-init globals so _ensure_k8s() returns our mocks
     op._k8s_configured = True
     op._core_v1_api = mock_core
     op._apps_v1_api = mock_apps
 
     yield mock_core, mock_apps
+
+
+def api_secret(resource_version):
+    """Create what the API answers a patch with, as far as the operator looks at it."""
+    return client.V1Secret(metadata=client.V1ObjectMeta(resource_version=resource_version))
+
+
+def applies(mock_core):
+    """Return the (name, namespace, body) of every server-side apply made."""
+    calls = mock_core.patch_namespaced_secret.call_args_list
+    return [call.args for call in calls if call.kwargs["_content_type"] == "application/apply-patch+yaml"]
+
+
+def applied(mock_core):
+    """Return the secret applied, the one time something was."""
+    ((_, _, body),) = applies(mock_core)
+    return body
 
 
 def create_vcluster_statefulset(name="test-cluster", namespace="vcluster-test"):
@@ -80,7 +100,7 @@ def enrolled_secret(name="test-cluster", namespace="vcluster-test", ca=b"fake-ca
     from vcluster_argocd_enroller.operator import build_argocd_secret
 
     body = build_argocd_secret(name, namespace, create_vcluster_secret(ca), labels=labels, project=project)
-    metadata = client.V1ObjectMeta(labels=body["metadata"]["labels"], annotations=body["metadata"].get("annotations"))
+    metadata = client.V1ObjectMeta(labels=body["metadata"]["labels"], annotations={}, resource_version="1")
     return client.V1Secret(metadata=metadata, data=body["data"])
 
 
@@ -140,11 +160,14 @@ class TestOperatorHandlers:
 
         result = operator.vcluster_created(**handler_args())
 
-        mock_core.create_namespaced_secret.assert_called_once()
-        call_args = mock_core.create_namespaced_secret.call_args
-
-        assert call_args[0][0] == "argocd"  # namespace
-        secret_body = call_args[0][1]
+        ((name, namespace, secret_body),) = applies(mock_core)
+        assert (name, namespace) == ("vcluster-vcluster-test-test-cluster", "argocd")
+        # Applied as the operator's field manager, taking back fields something else changed
+        kwargs = mock_core.patch_namespaced_secret.call_args.kwargs
+        assert (kwargs["field_manager"], kwargs["force"]) == ("vcluster-argocd-enroller", True)
+        # Only what the operator sets: no type, no annotations, and no version of a secret that is not there yet
+        assert set(secret_body) == {"apiVersion", "kind", "metadata", "data"}
+        assert set(secret_body["metadata"]) == {"name", "namespace", "labels"}
 
         # The namespace is part of the secret name, the ArgoCD cluster name and the labels
         assert secret_body["metadata"]["name"] == "vcluster-vcluster-test-test-cluster"
@@ -175,7 +198,7 @@ class TestOperatorHandlers:
         operator.vcluster_created(**handler_args("shared", "team-a"))
         operator.vcluster_created(**handler_args("shared", "team-b"))
 
-        names = [call[0][1]["metadata"]["name"] for call in mock_core.create_namespaced_secret.call_args_list]
+        names = [body["metadata"]["name"] for _, _, body in applies(mock_core)]
         assert names == ["vcluster-team-a-shared", "vcluster-team-b-shared"]
 
     def test_server_url_is_configurable(self, k8s_mocked, monkeypatch):
@@ -188,15 +211,16 @@ class TestOperatorHandlers:
 
         operator.vcluster_created(**handler_args())
 
-        secret_body = mock_core.create_namespaced_secret.call_args[0][1]
+        secret_body = applied(mock_core)
         server = base64.b64decode(secret_body["data"]["server"]).decode("utf-8")
         assert server == "https://test-cluster.vcluster-test.svc.cluster.local:443"
 
-    def test_up_to_date_secret_is_not_rewritten(self, k8s_mocked):
-        """A re-sync that finds nothing changed must not touch the ArgoCD secret."""
+    def test_up_to_date_secret_is_not_reported_as_updated(self, k8s_mocked, caplog):
+        """An apply that changes nothing leaves the secret at its version: the API server does the comparing."""
         from vcluster_argocd_enroller import operator
 
         mock_core, _ = k8s_mocked
+        mock_core.patch_namespaced_secret.return_value = api_secret(resource_version="1")
         serve_secrets(
             mock_core,
             {
@@ -205,13 +229,16 @@ class TestOperatorHandlers:
             },
         )
 
-        operator.vcluster_resync(name="test-cluster", namespace="vcluster-test")
+        with caplog.at_level("DEBUG"):
+            operator.vcluster_resync(name="test-cluster", namespace="vcluster-test")
 
-        mock_core.create_namespaced_secret.assert_not_called()
-        mock_core.replace_namespaced_secret.assert_not_called()
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("is up to date" in m for m in messages)
+        assert not any(m.startswith(("Created", "Updated", "Took over")) for m in messages)
+        assert len(mock_core.patch_namespaced_secret.call_args_list) == 1
         mock_core.delete_namespaced_secret.assert_not_called()
 
-    def test_rotated_credentials_are_synced(self, k8s_mocked):
+    def test_rotated_credentials_are_synced(self, k8s_mocked, caplog):
         from vcluster_argocd_enroller import operator
 
         mock_core, _ = k8s_mocked
@@ -223,12 +250,14 @@ class TestOperatorHandlers:
             },
         )
 
-        operator.vcluster_resync(name="test-cluster", namespace="vcluster-test")
+        with caplog.at_level("INFO"):
+            operator.vcluster_resync(name="test-cluster", namespace="vcluster-test")
 
-        name, namespace, body = mock_core.replace_namespaced_secret.call_args[0]
-        assert (name, namespace) == ("vcluster-vcluster-test-test-cluster", "argocd")
+        body = applied(mock_core)
         assert body["data"] == enrolled_secret(ca=b"rotated-ca-data").data
-        mock_core.create_namespaced_secret.assert_not_called()
+        # On top of the version that was read: a secret changed or replaced in between is a conflict to retry
+        assert body["metadata"]["resourceVersion"] == "1"
+        assert any(r.getMessage().startswith("Updated ArgoCD cluster secret") for r in caplog.records)
 
     def test_vcluster_updated_handler(self, k8s_mocked):
         """Test that vcluster update triggers ArgoCD re-enrollment."""
@@ -239,7 +268,7 @@ class TestOperatorHandlers:
 
         result = operator.vcluster_updated(**handler_args())
 
-        mock_core.create_namespaced_secret.assert_called_once()
+        assert len(applies(mock_core)) == 1
         assert result is None
 
     @pytest.mark.parametrize(
@@ -265,20 +294,20 @@ class TestOperatorHandlers:
         with pytest.raises(kopf.TemporaryError):
             operator.vcluster_created(**handler_args())
 
-        mock_core.create_namespaced_secret.assert_not_called()
-        mock_core.replace_namespaced_secret.assert_not_called()
+        assert not applies(mock_core)
         mock_core.delete_namespaced_secret.assert_not_called()
 
-    @pytest.mark.parametrize("failing", ["create_namespaced_secret", "replace_namespaced_secret"])
-    def test_failed_write_is_retried(self, k8s_mocked, failing):
+    @pytest.mark.parametrize("status", [409, 500], ids=["changed-in-between", "server-error"])
+    @pytest.mark.parametrize("enrolled", [False, True], ids=["create", "update"])
+    def test_failed_write_is_retried(self, k8s_mocked, status, enrolled):
         from vcluster_argocd_enroller import operator
 
         mock_core, _ = k8s_mocked
         secrets = {("vcluster-test", "vc-test-cluster"): create_vcluster_secret(ca=b"rotated-ca-data")}
-        if failing == "replace_namespaced_secret":
+        if enrolled:
             secrets[("argocd", "vcluster-vcluster-test-test-cluster")] = enrolled_secret()
         serve_secrets(mock_core, secrets)
-        getattr(mock_core, failing).side_effect = ApiException(status=500)
+        mock_core.patch_namespaced_secret.side_effect = ApiException(status=status)
 
         with pytest.raises(kopf.TemporaryError) as exc_info:
             operator.vcluster_created(**handler_args())
@@ -300,9 +329,7 @@ class TestOperatorHandlers:
 
         operator.vcluster_resumed(**handler_args())
 
-        assert mock_core.create_namespaced_secret.call_args[0][1]["metadata"]["name"] == (
-            "vcluster-vcluster-test-test-cluster"
-        )
+        assert applied(mock_core)["metadata"]["name"] == ("vcluster-vcluster-test-test-cluster")
         mock_core.delete_namespaced_secret.assert_called_once_with(name="vcluster-test-cluster", namespace="argocd")
 
     @pytest.mark.parametrize(
@@ -328,7 +355,7 @@ class TestOperatorHandlers:
 
         operator.vcluster_resumed(**handler_args())
 
-        mock_core.create_namespaced_secret.assert_called_once()
+        assert len(applies(mock_core)) == 1
         mock_core.delete_namespaced_secret.assert_not_called()
 
     def test_vcluster_deleted_handler(self, k8s_mocked):
@@ -382,7 +409,7 @@ class TestOperatorHandlers:
 
         operator.vcluster_created(**handler_args(plural=plural))
 
-        secret_body = mock_core.create_namespaced_secret.call_args[0][1]
+        secret_body = applied(mock_core)
         assert secret_body["metadata"]["name"] == "vcluster-vcluster-test-test-cluster"
 
     def test_handlers_watch_statefulsets_and_deployments_of_the_apps_group(self):
@@ -469,7 +496,7 @@ class TestOperatorHandlers:
         operator.vcluster_created(**handler_args("vcluster-my-cluster"))
 
         # vcluster names its secret and Service after the release, prefix included
-        secret_body = mock_core.create_namespaced_secret.call_args[0][1]
+        secret_body = applied(mock_core)
         assert secret_body["metadata"]["name"] == "vcluster-vcluster-test-vcluster-my-cluster"
         server = base64.b64decode(secret_body["data"]["server"]).decode("utf-8")
         assert server == "https://vcluster-my-cluster.vcluster-test"
@@ -558,7 +585,7 @@ class TestOperatorHandlers:
             operator.vcluster_created(**handler_args())
 
         assert "Failed to parse vcluster secret" in str(exc_info.value)
-        mock_core.create_namespaced_secret.assert_not_called()
+        assert not applies(mock_core)
 
     def test_argocd_namespace_from_env(self, k8s_mocked):
         """Test that ARGOCD_NAMESPACE env var is respected."""
@@ -570,8 +597,8 @@ class TestOperatorHandlers:
         # The default is "argocd"
         operator.vcluster_created(**handler_args())
 
-        call_args = mock_core.create_namespaced_secret.call_args
-        assert call_args[0][0] == "argocd"
+        ((_, namespace, _),) = applies(mock_core)
+        assert namespace == "argocd"
 
 
 ARGOCD_SECRET = ("argocd", "vcluster-vcluster-test-test-cluster")
@@ -593,7 +620,7 @@ class TestEnrollmentAnnotations:
 
         operator.vcluster_created(**handler_args(annotations=annotations))
 
-        body = mock_core.create_namespaced_secret.call_args[0][1]
+        body = applied(mock_core)
         assert body["metadata"]["labels"] == {
             "env": "dev",
             "example.com/team": "payments",
@@ -603,9 +630,7 @@ class TestEnrollmentAnnotations:
             "vcluster-argocd-enroller/namespace": "vcluster-test",
             "vcluster-argocd-enroller/name": "test-cluster",
         }
-        assert body["metadata"]["annotations"] == {
-            "vcluster-argocd-enroller/copied-labels": "empty,env,example.com/team"
-        }
+        assert "annotations" not in body["metadata"]
         assert base64.b64decode(body["data"]["project"]).decode("utf-8") == "payments"
 
     def test_unannotated_vcluster_gets_neither_project_nor_annotations(self, k8s_mocked):
@@ -616,7 +641,7 @@ class TestEnrollmentAnnotations:
 
         operator.vcluster_created(**handler_args())
 
-        body = mock_core.create_namespaced_secret.call_args[0][1]
+        body = applied(mock_core)
         assert "project" not in body["data"]
         assert "annotations" not in body["metadata"]
 
@@ -631,7 +656,7 @@ class TestEnrollmentAnnotations:
         with caplog.at_level("WARNING"):
             operator.vcluster_created(**handler_args(annotations={"vcluster-argocd-enroller/labels": asked}))
 
-        labels = mock_core.create_namespaced_secret.call_args[0][1]["metadata"]["labels"]
+        labels = applied(mock_core)["metadata"]["labels"]
         assert labels["env"] == "dev"
         assert labels["vcluster-argocd-enroller/name"] == "test-cluster"
         assert labels["vcluster-operator"] == "true"
@@ -646,7 +671,8 @@ class TestEnrollmentAnnotations:
         assert len(warnings) == 5 and all("vcluster-test/test-cluster" in w for w in warnings)
 
     def test_changed_labels_and_project_are_synced(self, k8s_mocked):
-        """A label that is no longer asked for goes; what something else put on the secret stays."""
+        """Only what is asked for now is applied. The API server drops what was applied before and no longer is,
+        and keeps what something else put on the secret: `task k3d-smoke` checks that against a real one."""
         from vcluster_argocd_enroller import operator
 
         mock_core, _ = k8s_mocked
@@ -658,19 +684,15 @@ class TestEnrollmentAnnotations:
 
         operator.vcluster_updated(**handler_args(annotations=annotations))
 
-        body = mock_core.replace_namespaced_secret.call_args[0][2]
+        body = applied(mock_core)
         assert body["metadata"]["labels"] == {
             "env": "prod",
-            "argocd.argoproj.io/kubernetes-version": "1.35",
             "argocd.argoproj.io/secret-type": "cluster",
             "vcluster-operator": "true",
             "vcluster-argocd-enroller/namespace": "vcluster-test",
             "vcluster-argocd-enroller/name": "test-cluster",
         }
-        assert body["metadata"]["annotations"] == {
-            "managed-by": "argocd.argoproj.io",
-            "vcluster-argocd-enroller/copied-labels": "env",
-        }
+        assert "annotations" not in body["metadata"]
         assert base64.b64decode(body["data"]["project"]).decode("utf-8") == "platform"
 
     def test_dropped_annotations_clear_the_labels_and_project(self, k8s_mocked):
@@ -682,26 +704,9 @@ class TestEnrollmentAnnotations:
 
         operator.vcluster_updated(**handler_args())
 
-        body = mock_core.replace_namespaced_secret.call_args[0][2]
+        body = applied(mock_core)
         assert body["metadata"]["labels"] == enrolled_secret().metadata.labels
-        assert body["metadata"]["annotations"] == {}
         assert body["data"] == enrolled_secret().data
-
-    def test_secret_in_sync_with_the_annotations_is_not_rewritten(self, k8s_mocked):
-        """Neither the copied labels nor the ones something else added make a re-sync write."""
-        from vcluster_argocd_enroller import operator
-
-        mock_core, _ = k8s_mocked
-        existing = enrolled_secret(labels={"env": "dev"}, project="payments")
-        existing.metadata.labels["argocd.argoproj.io/kubernetes-version"] = "1.35"
-        existing.metadata.annotations["managed-by"] = "argocd.argoproj.io"
-        serve_secrets(mock_core, {VC_SECRET: create_vcluster_secret(), ARGOCD_SECRET: existing})
-        annotations = {"vcluster-argocd-enroller/labels": "env=dev", "vcluster-argocd-enroller/project": "payments"}
-
-        operator.vcluster_resync(**handler_args(annotations=annotations))
-
-        mock_core.create_namespaced_secret.assert_not_called()
-        mock_core.replace_namespaced_secret.assert_not_called()
 
     @pytest.mark.parametrize("handler", ["vcluster_created", "vcluster_resumed", "vcluster_updated", "vcluster_resync"])
     @pytest.mark.parametrize("value", ["false", " False "])
@@ -713,7 +718,7 @@ class TestEnrollmentAnnotations:
 
         result = getattr(operator, handler)(**handler_args(annotations={"vcluster-argocd-enroller/enroll": value}))
 
-        mock_core.create_namespaced_secret.assert_not_called()
+        assert not applies(mock_core)
         mock_core.delete_namespaced_secret.assert_not_called()
         assert result is None
 
@@ -734,7 +739,6 @@ class TestEnrollmentAnnotations:
 
         deleted = [call.kwargs["name"] for call in mock_core.delete_namespaced_secret.call_args_list]
         assert deleted == ["vcluster-vcluster-test-test-cluster", "vcluster-test-cluster"]
-        mock_core.replace_namespaced_secret.assert_not_called()
 
     def test_opting_out_leaves_the_secret_of_something_else(self, k8s_mocked):
         from vcluster_argocd_enroller import operator
@@ -769,7 +773,7 @@ class TestEnrollmentAnnotations:
         with caplog.at_level("WARNING"):
             operator.vcluster_created(**handler_args(annotations={"vcluster-argocd-enroller/enroll": value}))
 
-        mock_core.create_namespaced_secret.assert_called_once()
+        assert len(applies(mock_core)) == 1
         assert any("neither true nor false" in r.getMessage() for r in caplog.records) == warns
 
     def test_deleting_an_opted_out_vcluster_finds_nothing_to_remove(self, k8s_mocked):
@@ -781,6 +785,145 @@ class TestEnrollmentAnnotations:
         operator.vcluster_deleted(**handler_args(annotations={"vcluster-argocd-enroller/enroll": "false"}))
 
         mock_core.delete_namespaced_secret.assert_not_called()
+
+
+def managed(manager, operation, labels=(), annotations=(), data=(), extra=None):
+    """Create a managed-fields entry: who the API server says set which fields of a secret."""
+    fields = {
+        "f:metadata": {
+            "f:labels": {".": {}, **{f"f:{key}": {} for key in labels}},
+            "f:annotations": {".": {}, **{f"f:{key}": {} for key in annotations}},
+        },
+        "f:data": {".": {}, **{f"f:{key}": {} for key in data}},
+        **(extra or {}),
+    }
+    return client.V1ManagedFieldsEntry(
+        manager=manager,
+        operation=operation,
+        api_version="v1",
+        fields_type="FieldsV1",
+        fields_v1=fields,
+        time=datetime(2026, 11, 1, 12, 0, tzinfo=UTC),
+    )
+
+
+OWN_LABELS = (
+    "argocd.argoproj.io/secret-type",
+    "vcluster-operator",
+    "vcluster-argocd-enroller/namespace",
+    "vcluster-argocd-enroller/name",
+)
+
+
+class TestFieldsWrittenBeforeServerSideApply:
+    """Test handing the fields of a secret written by 2.2 or earlier over to the operator's field manager.
+
+    Left with the old manager, a label or project dropped later would stay on the secret.
+    """
+
+    def secret_from_2_2(self):
+        """A 2.2 enrollment with copied labels and a project, also labelled by kubectl and by another Python tool."""
+        secret = enrolled_secret(labels={"env": "dev", "tier": "gold"}, project="payments")
+        secret.metadata.labels.update({"by-kubectl": "x", "by-python-tool": "y"})
+        secret.metadata.annotations = {"vcluster-argocd-enroller/copied-labels": "env,tier", "note": "kept"}
+        secret.metadata.managed_fields = [
+            managed(
+                "OpenAPI-Generator",
+                "Update",
+                labels=(*OWN_LABELS, "env", "tier", "by-python-tool"),
+                annotations=("vcluster-argocd-enroller/copied-labels",),
+                data=("name", "server", "config", "project"),
+                extra={"f:type": {}},
+            ),
+            managed("kubectl-label", "Update", labels=("by-kubectl",), annotations=("note",)),
+        ]
+        return secret
+
+    def test_fields_the_operator_wrote_are_taken_over(self, k8s_mocked):
+        from vcluster_argocd_enroller.operator import _adopted_managed_fields
+
+        kubectl, ours = _adopted_managed_fields(self.secret_from_2_2())
+
+        assert kubectl["manager"] == "kubectl-label" and kubectl["time"] == "2026-11-01T12:00:00Z"
+        assert kubectl["fieldsV1"]["f:metadata"]["f:labels"] == {".": {}, "f:by-kubectl": {}}
+        assert (ours["manager"], ours["operation"]) == ("vcluster-argocd-enroller", "Apply")
+        # Its own labels and the ones it copied, but not the label another Python client set under the same name
+        assert set(ours["fieldsV1"]["f:metadata"]["f:labels"]) == {f"f:{key}" for key in (*OWN_LABELS, "env", "tier")}
+        assert set(ours["fieldsV1"]["f:metadata"]["f:annotations"]) == {"f:vcluster-argocd-enroller/copied-labels"}
+        assert set(ours["fieldsV1"]["f:data"]) == {".", "f:name", "f:server", "f:config", "f:project"}
+        # Not the type: the operator does not apply one
+        assert set(ours["fieldsV1"]) == {"f:metadata", "f:data"}
+
+    def test_fields_already_applied_are_kept(self, k8s_mocked):
+        """A downgrade to 2.2 and back leaves both managers on the secret."""
+        from vcluster_argocd_enroller.operator import _adopted_managed_fields
+
+        secret = self.secret_from_2_2()
+        secret.metadata.managed_fields.append(
+            managed("vcluster-argocd-enroller", "Apply", labels=(*OWN_LABELS, "zone"), data=("name",))
+        )
+
+        *others, ours = _adopted_managed_fields(secret)
+
+        assert [entry["manager"] for entry in others] == ["kubectl-label"]
+        assert {"f:zone", "f:env", "f:tier"} <= set(ours["fieldsV1"]["f:metadata"]["f:labels"])
+
+    @pytest.mark.parametrize(
+        "managed_fields",
+        [
+            None,
+            [],
+            [managed("vcluster-argocd-enroller", "Apply", labels=OWN_LABELS), managed("kubectl-label", "Update")],
+        ],
+        ids=["unknown", "none", "applied"],
+    )
+    def test_nothing_to_take_over(self, k8s_mocked, managed_fields):
+        from vcluster_argocd_enroller.operator import _adopted_managed_fields
+
+        secret = enrolled_secret()
+        secret.metadata.managed_fields = managed_fields
+
+        assert _adopted_managed_fields(secret) is None
+
+    def test_sync_takes_the_fields_over_before_applying(self, k8s_mocked, caplog):
+        from vcluster_argocd_enroller import operator
+
+        mock_core, _ = k8s_mocked
+        serve_secrets(mock_core, {VC_SECRET: create_vcluster_secret(), ARGOCD_SECRET: self.secret_from_2_2()})
+        mock_core.patch_namespaced_secret.side_effect = [api_secret("2"), api_secret("3")]
+
+        with caplog.at_level("INFO"):
+            operator.vcluster_resync(**handler_args(annotations={"vcluster-argocd-enroller/labels": "env=dev"}))
+
+        takeover, apply = mock_core.patch_namespaced_secret.call_args_list
+        assert takeover.kwargs == {"_content_type": "application/merge-patch+json"}
+        name, namespace, patch = takeover.args
+        assert (name, namespace) == ("vcluster-vcluster-test-test-cluster", "argocd")
+        # Only the bookkeeping changes, and only if the secret is still the one that was read
+        assert set(patch) == {"metadata"} and set(patch["metadata"]) == {"resourceVersion", "managedFields"}
+        assert patch["metadata"]["resourceVersion"] == "1"
+        assert [entry["manager"] for entry in patch["metadata"]["managedFields"]] == [
+            "kubectl-label",
+            "vcluster-argocd-enroller",
+        ]
+        # The apply follows on the version the takeover left, without the dropped label, the project or the annotation
+        body = applied(mock_core)
+        assert apply.kwargs["_content_type"] == "application/apply-patch+yaml"
+        assert body["metadata"]["resourceVersion"] == "2"
+        assert "tier" not in body["metadata"]["labels"] and "project" not in body["data"]
+        assert any(r.getMessage().startswith("Took over the fields") for r in caplog.records)
+
+    def test_failed_takeover_is_retried_without_applying(self, k8s_mocked):
+        from vcluster_argocd_enroller import operator
+
+        mock_core, _ = k8s_mocked
+        serve_secrets(mock_core, {VC_SECRET: create_vcluster_secret(), ARGOCD_SECRET: self.secret_from_2_2()})
+        mock_core.patch_namespaced_secret.side_effect = ApiException(status=409)
+
+        with pytest.raises(kopf.TemporaryError):
+            operator.vcluster_resync(**handler_args())
+
+        assert not applies(mock_core)
 
 
 class TestAllowlists:
@@ -797,7 +940,7 @@ class TestAllowlists:
         mock_core, _ = k8s_mocked
         serve_secrets(mock_core, {("vcluster-test", "vc-test-cluster"): create_vcluster_secret()})
         operator.vcluster_created(**handler_args(annotations=self.ANNOTATIONS))
-        return mock_core.create_namespaced_secret.call_args[0][1]
+        return applied(mock_core)
 
     def test_everything_is_allowed_by_default(self, k8s_mocked):
         body = self.enroll(k8s_mocked)
@@ -816,7 +959,6 @@ class TestAllowlists:
         assert body["metadata"]["labels"]["env"] == "dev"
         assert body["metadata"]["labels"]["example.com/team"] == "payments"
         assert "owner" not in body["metadata"]["labels"]
-        assert body["metadata"]["annotations"] == {"vcluster-argocd-enroller/copied-labels": "env,example.com/team"}
         assert [r.getMessage() for r in caplog.records if "'owner' is not a label key" in r.getMessage()]
 
     @pytest.mark.parametrize(
@@ -856,7 +998,7 @@ class TestAllowlists:
             **handler_args(annotations={"vcluster-argocd-enroller/labels": "env=dev,owner=mallory"})
         )
 
-        body = mock_core.replace_namespaced_secret.call_args[0][2]
+        body = applied(mock_core)
         assert "owner" not in body["metadata"]["labels"]
         assert body["metadata"]["labels"]["env"] == "dev"
 

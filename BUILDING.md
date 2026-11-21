@@ -104,8 +104,8 @@ The operator monitors StatefulSets and Deployments with the label `app: vcluster
 
 1. **On Create/Resume/Update, and every `RESYNC_INTERVAL` seconds**:
    - Extracts the credentials from secret `vc-{vcluster-name}`
-   - Creates ArgoCD cluster secret `vcluster-{namespace}-{vcluster-name}` in the ArgoCD namespace, or replaces it
-     when its content differs
+   - Applies ArgoCD cluster secret `vcluster-{namespace}-{vcluster-name}` in the ArgoCD namespace (server-side
+     apply, field manager `vcluster-argocd-enroller`): created, changed where it differs, or left as it is
    - Secret contains cluster endpoint and TLS certificates, plus the labels and project the workload asks for
      with its `vcluster-argocd-enroller/labels` and `vcluster-argocd-enroller/project` annotations
    - A workload annotated `vcluster-argocd-enroller/enroll: "false"` is not enrolled, and an enrollment made
@@ -117,8 +117,13 @@ The operator monitors StatefulSets and Deployments with the label `app: vcluster
      (a StatefulSet replaced by a Deployment of the same name, or the reverse)
    - Cleans up gracefully even if secret doesn't exist
 
-Secrets that the operator did not write for that vCluster are never replaced or deleted. When it replaces one it
-did write, the labels and annotations something else added to it are kept.
+Secrets that the operator did not write for that vCluster are never written to or deleted. In one it did write it
+applies the data and its labels only: the API server removes what was applied before and no longer is (a label the
+workload dropped), and keeps the labels, annotations and finalizers something else added.
+
+Secrets written by 2.2 and earlier were created and replaced whole. The first sync hands the fields the operator
+wrote in them over to its field manager (`_adopted_managed_fields()`), without which a label dropped later would
+stay. `task k3d-smoke` runs that against `tests/k3d/fake-vcluster-2.2.yaml`.
 
 ## Configuration
 
