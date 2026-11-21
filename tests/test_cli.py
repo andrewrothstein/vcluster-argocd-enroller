@@ -106,6 +106,21 @@ class TestRun:
         assert kwargs["clusterwide"] is False
         assert kwargs["namespaces"] == ["team-a"]
 
+    @pytest.mark.parametrize(
+        "options",
+        [{"namespace": "team-a", "peering_name": "enroller"}, {"clusterwide": False}],
+        ids=["namespace-with-peering", "no-clusterwide-alone"],
+    )
+    def test_combinations_kopf_would_not_honour_are_refused(self, kopf_mocked, options):
+        """kopf idles without a namespaced peering object, and watches everything when told neither scope."""
+        mock_run, _ = kopf_mocked
+
+        with pytest.raises(SystemExit) as exc:
+            cli.run(**options)
+
+        assert exc.value.code == 1
+        mock_run.assert_not_called()
+
     def test_peering_name_enables_leader_election(self, kopf_mocked):
         mock_run, _ = kopf_mocked
 

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `operator.allowedLabels` and `operator.allowedProjects` (`ALLOWED_LABELS`, `ALLOWED_PROJECTS`) limit the label
+  keys and the projects a vCluster's workload may ask for with its annotations; `*` matches anything. Empty, the
+  default, allows everything as before. What is not allowed is ignored with a warning, and the vCluster is
+  enrolled without it
+
+### Fixed
+- `--namespace` together with `--peering-name` is refused at startup. The operator used to start and then idle:
+  kopf waited for a namespaced peering object, and the chart installs the cluster-wide one
+- `--no-clusterwide` without `--namespace` is refused at startup. It used to watch every namespace anyway
+
 ## [2.2.1] - 2026-11-17
 
 ### Fixed

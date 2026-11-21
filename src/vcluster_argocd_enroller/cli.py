@@ -54,7 +54,7 @@ def run(
     Parameters
     ----------
     namespace : str, optional
-        Namespace to watch for vClusters (default: all namespaces)
+        Namespace to watch for vClusters (default: all namespaces); not with --peering-name
     dev : bool
         Run in development mode (with --peering-name: outrank every other instance, so they pause)
     verbose : bool
@@ -67,12 +67,20 @@ def run(
         Name of the kopf peering object used for leader election: only the instance with the highest
         priority works, the rest stand by. Defaults to $PEERING_NAME; without it there is no peering.
     clusterwide : bool
-        Watch cluster-wide (default: True)
+        Watch cluster-wide (default: True); --no-clusterwide needs --namespace
     health_port : int
         Port serving /healthz for liveness and readiness probes; defaults to $HEALTH_PORT
     """
     import kopf
     import uvloop
+
+    # kopf would not say no to either: it idles for want of a namespaced peering object, or watches everything.
+    if namespace and peering_name:
+        console.print("[red]--namespace cannot be combined with --peering-name: leader election is cluster-wide[/red]")
+        sys.exit(1)
+    if not clusterwide and not namespace:
+        console.print("[red]--no-clusterwide needs a --namespace to watch[/red]")
+        sys.exit(1)
 
     if verbose:
         log_level = "DEBUG"

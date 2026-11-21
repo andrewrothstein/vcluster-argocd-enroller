@@ -61,6 +61,8 @@ The following table lists the configurable parameters and their default values:
 | `operator.argoCDNamespace` | ArgoCD namespace | `argocd` |
 | `operator.serverURL` | Address ArgoCD reaches each vCluster at; `{name}` and `{namespace}` are replaced | `https://{name}.{namespace}` |
 | `operator.resyncInterval` | Seconds between re-syncs of each vCluster (credential rotation, drift) | `300` |
+| `operator.allowedLabels` | Label keys vClusters may ask for with the `labels` annotation; `*` matches anything, empty allows all | `[]` |
+| `operator.allowedProjects` | Projects vClusters may ask for with the `project` annotation; `*` matches anything, empty allows all | `[]` |
 | `operator.logLevel` | Log level (DEBUG, INFO, WARNING, ERROR) | `INFO` |
 | `rbac.create` | Create RBAC resources | `true` |
 | `autoscaling.enabled` | Enable HPA (needs `leaderElection.enabled`; extra replicas are standbys) | `false` |
@@ -82,8 +84,9 @@ or Deployment (`controlPlane.statefulSet.annotations` in the vcluster chart):
 | `vcluster-argocd-enroller/project` | The ArgoCD project the cluster is scoped to |
 | `vcluster-argocd-enroller/enroll` | `"false"` keeps the vCluster out of ArgoCD |
 
-See the [project README](https://github.com/andrewrothstein/vcluster-argocd-enroller#per-vcluster-settings) for
-the details.
+Whoever can edit the workload sets them: `operator.allowedLabels` and `operator.allowedProjects` limit the label
+keys and projects they may ask for. See the
+[project README](https://github.com/andrewrothstein/vcluster-argocd-enroller#per-vcluster-settings) for the details.
 
 ## Uninstallation
 
