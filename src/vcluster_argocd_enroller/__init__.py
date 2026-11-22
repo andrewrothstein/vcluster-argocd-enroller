@@ -1,3 +1,3 @@
 """vCluster ArgoCD Enroller - Kubernetes operator for automatic vCluster enrollment in ArgoCD."""
 
-__version__ = "2.2.1"
+__version__ = "2.3.0"
