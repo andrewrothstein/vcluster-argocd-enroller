@@ -113,7 +113,7 @@ tasks:
         --set 'operator.allowedLabels={env,tier}' --set 'operator.allowedProjects={team-*}'
 
   k3d-smoke:
-    desc: "Verify the operator is Ready under its NetworkPolicy with one active replica, then enroll fake vClusters and check the ArgoCD secrets through create, migration, re-sync, labels and project, opt-out, a change of workload kind and delete"
+    desc: "Verify the operator is Ready under its NetworkPolicy with one active replica, then enroll fake vClusters and check the ArgoCD secrets through create, migration, re-sync, labels and project, an enrollment written by 2.2, opt-out, a change of workload kind and delete"
     cmds:
       - kubectl -n vcluster-system get networkpolicy test-release-vcluster-argocd-enroller
       - kubectl -n vcluster-system wait --for=condition=Ready pod -l app.kubernetes.io/name=vcluster-argocd-enroller --timeout=120s
@@ -138,12 +138,30 @@ tasks:
       - kubectl -n vcluster-system annotate statefulset smoke vcluster-argocd-enroller/labels=env=dev,owner=mallory vcluster-argocd-enroller/project=platform
       - kubectl -n argocd wait --for=jsonpath='{.metadata.labels.env}'=dev secret/vcluster-vcluster-system-smoke --timeout=60s
       - kubectl -n argocd get secret vcluster-vcluster-system-smoke -o jsonpath='{.metadata.labels.owner}{.data.project}' | grep -c . | grep -qx 0
-      # A label that is no longer asked for leaves the secret; one added by something else stays
+      # A label that is no longer asked for leaves the secret; what something else put there stays
       - kubectl -n argocd label secret vcluster-team-b-smoke added-by=someone-else
-      - kubectl -n team-b annotate statefulset smoke --overwrite vcluster-argocd-enroller/labels=env=dev
-      - kubectl -n argocd wait --for=jsonpath='{.metadata.annotations.vcluster-argocd-enroller/copied-labels}'=env secret/vcluster-team-b-smoke --timeout=60s
+      - kubectl -n argocd annotate secret vcluster-team-b-smoke note=kept
+      - kubectl -n argocd patch secret vcluster-team-b-smoke --type=merge -p '{"metadata"{{":"}}{"finalizers"{{":"}}["example.com/keep"]}}'
+      - kubectl -n team-b annotate statefulset smoke --overwrite vcluster-argocd-enroller/labels=env=staging
+      - kubectl -n argocd wait --for=jsonpath='{.metadata.labels.env}'=staging secret/vcluster-team-b-smoke --timeout=60s
       - kubectl -n argocd get secret vcluster-team-b-smoke -o jsonpath='{.metadata.labels.tier}' | grep -c . | grep -qx 0
-      - kubectl -n argocd get secret vcluster-team-b-smoke -o jsonpath='{.metadata.labels.added-by}' | grep -qx someone-else
+      - kubectl -n argocd get secret vcluster-team-b-smoke -o jsonpath='{.metadata.labels.added-by}/{.metadata.annotations.note}/{.metadata.finalizers[0]}' | grep -qx someone-else/kept/example.com/keep
+      # A label of the operator's that something else changes is put back with the next re-sync
+      - kubectl -n argocd label secret vcluster-team-b-smoke --overwrite env=prod
+      - kubectl -n argocd wait --for=jsonpath='{.metadata.labels.env}'=staging secret/vcluster-team-b-smoke --timeout=60s
+      - kubectl -n argocd patch secret vcluster-team-b-smoke --type=merge -p '{"metadata"{{":"}}{"finalizers"{{":"}}null}}'
+      # An enrollment written by 2.2 is taken over: the env label and the project its workload no longer asks for go,
+      # with the annotation that kept track of copied labels, and a label something else set with the Python client stays
+      - defer: kubectl delete -f tests/k3d/fake-vcluster-2.2.yaml --ignore-not-found --wait=false
+      - kubectl create -f tests/k3d/fake-vcluster-2.2.yaml --field-manager=OpenAPI-Generator
+      - kubectl -n argocd wait --for=jsonpath='{.metadata.labels.tier}'=silver secret/vcluster-team-c-smoke --timeout=60s
+      - kubectl -n argocd get secret vcluster-team-c-smoke -o jsonpath='{.metadata.labels.env}{.data.project}{.metadata.annotations}' | grep -c . | grep -qx 0
+      - kubectl -n argocd get secret vcluster-team-c-smoke -o jsonpath='{.metadata.labels.by-python-tool}' | grep -qx kept
+      - kubectl -n argocd get secret vcluster-team-c-smoke --show-managed-fields -o jsonpath='{.metadata.managedFields[*].manager}' | grep -qx vcluster-argocd-enroller
+      # ...and from then on a label that is dropped goes
+      - kubectl -n team-c annotate statefulset smoke --overwrite vcluster-argocd-enroller/labels=env=dev
+      - kubectl -n argocd wait --for=jsonpath='{.metadata.labels.env}'=dev secret/vcluster-team-c-smoke --timeout=60s
+      - kubectl -n argocd get secret vcluster-team-c-smoke -o jsonpath='{.metadata.labels.tier}' | grep -c . | grep -qx 0
       # A vCluster that opts out is unenrolled and stays out across re-syncs, until it opts back in
       - kubectl -n team-b annotate statefulset smoke vcluster-argocd-enroller/enroll=false
       - kubectl -n argocd wait --for=delete secret/vcluster-team-b-smoke --timeout=60s

@@ -5,7 +5,6 @@ import os
 import re
 from collections.abc import Collection, Mapping
 from fnmatch import fnmatchcase
-from typing import cast
 
 import kopf
 from kubernetes import client, config
@@ -57,8 +56,17 @@ ENROLL_ANNOTATION = "vcluster-argocd-enroller/enroll"
 LABELS_ANNOTATION = "vcluster-argocd-enroller/labels"
 # The ArgoCD project the cluster is scoped to (the secret's `project` field).
 PROJECT_ANNOTATION = "vcluster-argocd-enroller/project"
-# On the ArgoCD secret: the keys of the labels copied from the workload, so that a dropped one can be removed.
+
+# ArgoCD secrets are written with server-side apply under this name. The API server keeps track of the fields
+# applied, so one that is no longer applied (a label the workload dropped) goes, and nothing else is touched.
+FIELD_MANAGER = "vcluster-argocd-enroller"
+# The name under which the API server recorded the writes of 2.2 and earlier: the Python client's user agent.
+LEGACY_FIELD_MANAGER = "OpenAPI-Generator"
+# On ArgoCD secrets written by 2.2: the keys of the labels copied from the workload. Read once more, to hand
+# those labels over to FIELD_MANAGER.
 COPIED_LABELS_ANNOTATION = "vcluster-argocd-enroller/copied-labels"
+APPLY_PATCH = "application/apply-patch+yaml"
+MERGE_PATCH = "application/merge-patch+json"
 
 # What Kubernetes accepts as a label key's prefix, and as its name or a label value.
 _DNS_SUBDOMAIN = re.compile(r"[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*")
@@ -239,7 +247,6 @@ def build_argocd_secret(
                 NAMESPACE_LABEL: namespace,
                 NAME_LABEL: vcluster_name,
             },
-            **({"annotations": {COPIED_LABELS_ANNOTATION: ",".join(sorted(copied))}} if copied else {}),
         },
         "data": {
             **({"project": encode(project)} if project else {}),
@@ -271,30 +278,75 @@ def read_argocd_secret(core_v1_api: client.CoreV1Api, name: str) -> client.V1Sec
         raise
 
 
-def _keeping_foreign_metadata(existing: client.V1Secret, desired: dict) -> dict:
-    """Return the desired ArgoCD secret with the labels and annotations something else put on the existing one.
+def _version(secret: client.V1Secret) -> str | None:
+    """Return the resource version of a secret read from the API."""
+    return secret.metadata.resource_version if secret.metadata else None
 
-    ArgoCD labels cluster secrets itself when asked to, and so may anyone with kubectl. The labels this
-    operator copied from the workload earlier are not carried over: one that is no longer asked for goes.
+
+def _union(fields: dict, more: Mapping) -> dict:
+    """Merge one managed-fields set into another."""
+    for key, value in more.items():
+        fields[key] = _union(fields.get(key, {}), value) if isinstance(value, Mapping) else value
+    return fields
+
+
+def _adopted_managed_fields(secret: client.V1Secret) -> list[dict] | None:
+    """Return the managed fields of an ArgoCD secret written by 2.2 or earlier, handed over to FIELD_MANAGER.
+
+    None when there is nothing to hand over. Without this the first apply would share those fields with
+    LEGACY_FIELD_MANAGER, and a label or project dropped later would stay: something else still "owned" it.
+    Only what the operator wrote is taken: the secret's data, its own labels, and the labels and annotation
+    it recorded as copied. Whatever else another user of the Python client set under the same name is left as is.
     """
-    meta = existing.metadata
-    labels = dict((meta.labels if meta else None) or {})
-    annotations = dict((meta.annotations if meta else None) or {})
-    for key in filter(None, annotations.pop(COPIED_LABELS_ANNOTATION, "").split(",")):
-        labels.pop(key, None)
-    labels.update(desired["metadata"]["labels"])
-    annotations.update(desired["metadata"].get("annotations", {}))
-    return {**desired, "metadata": {**desired["metadata"], "labels": labels, "annotations": annotations}}
+    meta = secret.metadata
+    entries = (meta.managed_fields if meta else None) or []
+    legacy = [e for e in entries if e.manager == LEGACY_FIELD_MANAGER and e.operation == "Update" and not e.subresource]
+    if not legacy:
+        return None
+    ours = [e for e in entries if e.manager == FIELD_MANAGER and e.operation == "Apply" and not e.subresource]
 
+    written: dict = {}
+    for entry in legacy:
+        _union(written, entry.fields_v1 or {})
+    copied = (((meta.annotations if meta else None) or {}).get(COPIED_LABELS_ANNOTATION, "")).split(",")
+    labels = {f"f:{key}" for key in (*RESERVED_LABELS, *filter(None, copied))}
+    written_meta = written.get("f:metadata", {})
+    fields = {
+        "f:data": written.get("f:data", {}),
+        "f:metadata": {
+            "f:labels": {k: v for k, v in written_meta.get("f:labels", {}).items() if k in labels},
+            "f:annotations": {
+                k: v for k, v in written_meta.get("f:annotations", {}).items() if k == f"f:{COPIED_LABELS_ANNOTATION}"
+            },
+        },
+    }
+    # Plus what is applied already, on a secret that an older version wrote to again after a downgrade
+    for entry in ours:
+        _union(fields, entry.fields_v1 or {})
 
-def _in_sync(existing: client.V1Secret, desired: dict) -> bool:
-    """Tell whether an ArgoCD secret already carries the desired data, labels and annotations."""
-    meta = existing.metadata
-    return (
-        existing.data == desired["data"]
-        and ((meta.labels if meta else None) or {}) == desired["metadata"]["labels"]
-        and ((meta.annotations if meta else None) or {}) == desired["metadata"]["annotations"]
+    adopted = [
+        {
+            "manager": entry.manager,
+            "operation": entry.operation,
+            "apiVersion": entry.api_version,
+            "fieldsType": entry.fields_type,
+            "fieldsV1": entry.fields_v1,
+            **({"subresource": entry.subresource} if entry.subresource else {}),
+            **({"time": entry.time.strftime("%Y-%m-%dT%H:%M:%SZ")} if entry.time else {}),
+        }
+        for entry in entries
+        if entry not in legacy and entry not in ours
+    ]
+    adopted.append(
+        {
+            "manager": FIELD_MANAGER,
+            "operation": "Apply",
+            "apiVersion": "v1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": fields,
+        }
     )
+    return adopted
 
 
 def _delete_if_owned(core_v1_api: client.CoreV1Api, name: str, namespace: str, vcluster_name: str) -> bool:
@@ -314,22 +366,39 @@ def _delete_if_owned(core_v1_api: client.CoreV1Api, name: str, namespace: str, v
 
 
 def sync_enrollment(core_v1_api: client.CoreV1Api, namespace: str, vcluster_name: str, desired: dict) -> str | None:
-    """Create a vCluster's ArgoCD secret, or replace the one that differs, and drop the one 1.x wrote for it.
+    """Apply a vCluster's ArgoCD secret, and drop the one 1.x wrote for it.
 
-    Returns what was done to the secret, "Created" or "Updated", or None when it was up to date already.
+    Returns what that did to the secret, "Created" or "Updated", or None when it was up to date already.
     Raises NotOwnedError rather than touch a secret that is not this vCluster's enrollment.
+
+    The apply sets the secret's data and labels and nothing else: labels, annotations and finalizers that
+    something else put there stay, and what this operator applied earlier but no longer does is removed.
     """
     name = desired["metadata"]["name"]
-    done = None
     existing = read_argocd_secret(core_v1_api, name)
+    if existing is not None:
+        if not owns(existing, namespace, vcluster_name):
+            raise NotOwnedError(f"ArgoCD secret {name} exists but is not {namespace}/{vcluster_name}'s")
+        if (managed_fields := _adopted_managed_fields(existing)) is not None:
+            existing = core_v1_api.patch_namespaced_secret(
+                name,
+                ARGOCD_NAMESPACE,
+                {"metadata": {"resourceVersion": _version(existing), "managedFields": managed_fields}},
+                _content_type=MERGE_PATCH,
+            )
+            logger.info(f"Took over the fields of ArgoCD cluster secret {name} written before server-side apply")
+        # Applying on top of the version just read: a secret changed, or replaced, in between is a 409 to retry.
+        version = _version(existing)
+        desired = {**desired, "metadata": {**desired["metadata"], "resourceVersion": version}}
+
+    applied = core_v1_api.patch_namespaced_secret(
+        name, ARGOCD_NAMESPACE, desired, field_manager=FIELD_MANAGER, force=True, _content_type=APPLY_PATCH
+    )
     if existing is None:
-        core_v1_api.create_namespaced_secret(ARGOCD_NAMESPACE, cast(client.V1Secret, desired))
-        done = "Created"
-    elif not owns(existing, namespace, vcluster_name):
-        raise NotOwnedError(f"ArgoCD secret {name} exists but is not {namespace}/{vcluster_name}'s")
-    elif not _in_sync(existing, desired := _keeping_foreign_metadata(existing, desired)):
-        core_v1_api.replace_namespaced_secret(name, ARGOCD_NAMESPACE, cast(client.V1Secret, desired))
-        done = "Updated"
+        done: str | None = "Created"
+    else:
+        # An apply that changes nothing leaves the resource version alone
+        done = "Updated" if _version(applied) != version else None
     if done:
         logger.info(f"{done} ArgoCD cluster secret {name} for vcluster {namespace}/{vcluster_name}")
     else:

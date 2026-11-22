@@ -13,6 +13,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   default, allows everything as before. What is not allowed is ignored with a warning, and the vCluster is
   enrolled without it
 
+### Changed
+- ArgoCD cluster secrets are written with server-side apply, as field manager `vcluster-argocd-enroller`. The
+  operator applies a secret's data and labels and nothing else, so finalizers and owner references on it are no
+  longer wiped, a label added while the operator was writing is no longer lost, and a write on top of a secret
+  that changed in between is retried. The `vcluster-argocd-enroller/copied-labels` annotation is gone: the API
+  server keeps track of which labels the operator set
+- Secrets written by 2.2 and earlier are taken over on the first sync, in place and without a moment in which a
+  label or the secret is missing. After a downgrade to 2.2, labels and a project dropped since stay on the
+  secret until the operator is upgraded again
+- A label key a vCluster asks for belongs to the operator from then on: a label of that key set by hand is
+  overwritten, and removed when the vCluster stops asking for it
+- The chart's Role in the ArgoCD namespace no longer grants `update` on secrets
+
 ### Fixed
 - `--namespace` together with `--peering-name` is refused at startup. The operator used to start and then idle:
   kopf waited for a namespaced peering object, and the chart installs the cluster-wide one

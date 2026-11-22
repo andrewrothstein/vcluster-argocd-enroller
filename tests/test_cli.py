@@ -71,6 +71,17 @@ def serve_secrets(mock_core, secrets):
     mock_core.read_namespaced_secret.side_effect = read
 
 
+def applied(mock_core):
+    """Return the (name, namespace, body) of the one server-side apply made."""
+    (call,) = mock_core.patch_namespaced_secret.call_args_list
+    assert call.kwargs == {
+        "field_manager": "vcluster-argocd-enroller",
+        "force": True,
+        "_content_type": "application/apply-patch+yaml",
+    }
+    return call.args
+
+
 def vcluster_workload(name, namespace, replicas, ready, annotations=None):
     """Create a mock vCluster StatefulSet or Deployment, as far as `check` looks at it."""
     workload = Mock(metadata=client.V1ObjectMeta(name=name, namespace=namespace, annotations=annotations))
@@ -305,7 +316,7 @@ class TestEnroll:
 
         cli.enroll("my-cluster", "team-a")
 
-        namespace, body = core_v1.create_namespaced_secret.call_args[0]
+        _, namespace, body = applied(core_v1)
         assert namespace == "gitops"
         assert body["metadata"] == {
             "name": "vcluster-team-a-my-cluster",
@@ -326,10 +337,9 @@ class TestEnroll:
 
         cli.enroll("my-cluster", "team-a", label=["env=dev", "example.com/team=payments"], project="payments")
 
-        body = core_v1.create_namespaced_secret.call_args[0][1]
+        _, _, body = applied(core_v1)
         assert body["metadata"]["labels"]["env"] == "dev"
         assert body["metadata"]["labels"]["example.com/team"] == "payments"
-        assert body["metadata"]["annotations"] == {"vcluster-argocd-enroller/copied-labels": "env,example.com/team"}
         assert base64.b64decode(body["data"]["project"]).decode("utf-8") == "payments"
 
     @pytest.mark.parametrize("label", ["env", "vcluster-operator=false"])
@@ -339,7 +349,7 @@ class TestEnroll:
 
         assert exc.value.code == 1
         core_v1.read_namespaced_secret.assert_not_called()
-        core_v1.create_namespaced_secret.assert_not_called()
+        core_v1.patch_namespaced_secret.assert_not_called()
 
     def test_already_enrolled_is_left_alone(self, core_v1):
         serve_secrets(core_v1, {("gitops", "vcluster-team-a-my-cluster"): enrolled_secret("my-cluster", "team-a")})
@@ -347,8 +357,7 @@ class TestEnroll:
         cli.enroll("my-cluster", "team-a")
 
         core_v1.read_namespaced_secret.assert_called_once_with(name="vcluster-team-a-my-cluster", namespace="gitops")
-        core_v1.create_namespaced_secret.assert_not_called()
-        core_v1.replace_namespaced_secret.assert_not_called()
+        core_v1.patch_namespaced_secret.assert_not_called()
 
     def test_failed_enrollment_check_is_not_treated_as_missing(self, core_v1):
         core_v1.read_namespaced_secret.side_effect = ApiException(status=403, reason="Forbidden")
@@ -357,16 +366,13 @@ class TestEnroll:
             cli.enroll("my-cluster", "team-a")
 
         assert exc.value.code == 1
-        core_v1.create_namespaced_secret.assert_not_called()
+        core_v1.patch_namespaced_secret.assert_not_called()
 
     def test_force_replaces_existing_secret(self, core_v1):
-        """As the operator does it: what something else put on the secret stays, labels no longer asked for go."""
-        existing = enrolled_secret(
-            "my-cluster",
-            "team-a",
-            labels={"env": "dev", "added-by": "someone"},
-            annotations={"vcluster-argocd-enroller/copied-labels": "env", "note": "kept"},
-        )
+        """As the operator does it, with an apply of what is asked for now: the API server keeps what something
+        else put on the secret and drops the labels no longer applied."""
+        existing = enrolled_secret("my-cluster", "team-a", labels={"env": "dev", "added-by": "someone"})
+        existing.metadata.resource_version = "7"
         serve_secrets(
             core_v1,
             {
@@ -377,13 +383,11 @@ class TestEnroll:
 
         cli.enroll("my-cluster", "team-a", force=True, label=["tier=gold"])
 
-        name, namespace, body = core_v1.replace_namespaced_secret.call_args[0]
+        name, namespace, body = applied(core_v1)
         assert (name, namespace) == ("vcluster-team-a-my-cluster", "gitops")
-        assert body["metadata"]["labels"]["added-by"] == "someone"
         assert body["metadata"]["labels"]["tier"] == "gold"
-        assert "env" not in body["metadata"]["labels"]
-        assert body["metadata"]["annotations"] == {"vcluster-argocd-enroller/copied-labels": "tier", "note": "kept"}
-        core_v1.create_namespaced_secret.assert_not_called()
+        assert not {"env", "added-by"} & body["metadata"]["labels"].keys()
+        assert body["metadata"]["resourceVersion"] == "7"
         core_v1.delete_namespaced_secret.assert_not_called()
 
     @pytest.mark.parametrize("force", [False, True])
@@ -402,12 +406,11 @@ class TestEnroll:
 
         assert exc.value.code == 1
         assert "not overwriting it" in capsys.readouterr().out
-        core_v1.create_namespaced_secret.assert_not_called()
-        core_v1.replace_namespaced_secret.assert_not_called()
+        core_v1.patch_namespaced_secret.assert_not_called()
 
     def test_failed_write_exits(self, core_v1):
         serve_secrets(core_v1, {("team-a", "vc-my-cluster"): vcluster_secret()})
-        core_v1.create_namespaced_secret.side_effect = ApiException(status=403, reason="Forbidden")
+        core_v1.patch_namespaced_secret.side_effect = ApiException(status=403, reason="Forbidden")
 
         with pytest.raises(SystemExit) as exc:
             cli.enroll("my-cluster", "team-a")
@@ -421,7 +424,7 @@ class TestEnroll:
             cli.enroll("my-cluster", "team-a")
 
         assert exc.value.code == 1
-        core_v1.create_namespaced_secret.assert_not_called()
+        core_v1.patch_namespaced_secret.assert_not_called()
 
 
 class TestUnenroll:

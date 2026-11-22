@@ -22,9 +22,13 @@ This lets ArgoCD immediately discover and deploy to new vClusters without manual
 Application targets a vCluster with `destination.name: {namespace}-{name}`.
 
 The namespace is part of every name, so vClusters that share a name in different namespaces are enrolled side by
-side. The operator only ever replaces or deletes secrets it wrote for that same vCluster (it labels them
+side. The operator only ever writes to or deletes secrets it wrote for that same vCluster (it labels them
 `vcluster-argocd-enroller/namespace` and `vcluster-argocd-enroller/name`); a secret of the same name that belongs to
 something else is left alone and reported in the logs.
+
+It writes with [server-side apply](https://kubernetes.io/docs/reference/using-api/server-side-apply/), as field
+manager `vcluster-argocd-enroller`, and applies the secret's data and labels only. Labels, annotations and
+finalizers that something else puts on the secret (ArgoCD's own cluster labels, for one) are not touched.
 
 ## Prerequisites
 
@@ -99,6 +103,11 @@ controlPlane:
 ```
 
 or on a running vCluster with `kubectl annotate`. Either way the change reaches ArgoCD right away.
+
+A label key a vCluster asks for is the operator's from then on. If the secret already carried a label of that key,
+set by hand or by another tool, its value is overwritten; when the vCluster stops asking for the key the label is
+removed, not put back to what it was. The same goes for a label of the operator's that something else changes: the
+next re-sync sets it back.
 
 ### Limiting what a vCluster can ask for
 

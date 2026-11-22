@@ -1,0 +1,66 @@
+# A fake vCluster whose enrollment `task k3d-smoke` writes the way 2.2 did, before the operator sees it:
+# created with the field manager the Python client's writes were recorded under, carrying two copied
+# labels, the annotation that kept track of them, a project, and a label that some other user of the
+# Python client put there. The operator is expected to take the fields it wrote over to its own field
+# manager, so that what the workload no longer asks for (the env label, the project) goes.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: team-c
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: vcluster-team-c-smoke
+  namespace: argocd
+  labels:
+    argocd.argoproj.io/secret-type: cluster
+    vcluster-operator: "true"
+    vcluster-argocd-enroller/namespace: team-c
+    vcluster-argocd-enroller/name: smoke
+    env: dev
+    tier: gold
+    by-python-tool: kept
+  annotations:
+    vcluster-argocd-enroller/copied-labels: env,tier
+stringData:
+  name: team-c-smoke
+  server: https://smoke.team-c
+  project: team-c
+  config: '{}'
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: vc-smoke
+  namespace: team-c
+stringData:
+  certificate-authority: Y2E=
+  client-certificate: Y2VydA==
+  client-key: a2V5
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: smoke
+  namespace: team-c
+  labels:
+    app: vcluster
+  annotations:
+    vcluster-argocd-enroller/labels: tier=silver
+spec:
+  replicas: 0
+  serviceName: smoke
+  selector:
+    matchLabels:
+      app: vcluster
+      release: smoke
+  template:
+    metadata:
+      labels:
+        app: vcluster
+        release: smoke
+    spec:
+      containers:
+        - name: pause
+          image: registry.k8s.io/pause:3.10
