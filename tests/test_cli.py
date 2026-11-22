@@ -117,6 +117,16 @@ class TestRun:
         assert kwargs["clusterwide"] is False
         assert kwargs["namespaces"] == ["team-a"]
 
+    @pytest.mark.parametrize("namespace,swept", [(None, ()), ("team-a", ("team-a",))])
+    def test_orphan_sweep_keeps_to_the_namespace_watched(self, kopf_mocked, monkeypatch, namespace, swept):
+        from vcluster_argocd_enroller import operator
+
+        monkeypatch.setattr(operator, "WATCHED_NAMESPACES", ("stale",))
+
+        cli.run(namespace=namespace)
+
+        assert operator.WATCHED_NAMESPACES == swept
+
     @pytest.mark.parametrize(
         "options",
         [{"namespace": "team-a", "peering_name": "enroller"}, {"clusterwide": False}],

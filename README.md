@@ -17,6 +17,8 @@ database or a separately deployed etcd). For each one it:
 3. Re-syncs every few minutes: rotated vCluster credentials are picked up, and a changed or removed ArgoCD secret
    is restored
 4. Removes the ArgoCD secret when the vCluster is deleted
+5. Removes the ArgoCD secrets of vClusters that went unnoticed: deleted while the operator was down, or no
+   longer labelled `app=vcluster`
 
 This lets ArgoCD immediately discover and deploy to new vClusters without manual cluster registration. An
 Application targets a vCluster with `destination.name: {namespace}-{name}`.
@@ -61,6 +63,7 @@ Key Helm values:
 | `operator.resyncInterval` | Seconds between re-syncs of each vCluster | `300` |
 | `operator.allowedLabels` | Label keys vClusters may ask for with the `labels` annotation; `*` matches anything, empty allows all | `[]` |
 | `operator.allowedProjects` | Projects vClusters may ask for with the `project` annotation; `*` matches anything, empty allows all | `[]` |
+| `operator.sweepOrphans` | Remove enrollments whose vCluster is gone or no longer labelled `app=vcluster` | `true` |
 | `operator.logLevel` | Log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) | `INFO` |
 | `replicaCount` | Operator replicas; more than one needs `leaderElection.enabled` | `1` |
 | `leaderElection.enabled` | Run one active replica and keep the others on standby | `false` |
@@ -157,7 +160,8 @@ The operator also provides CLI subcommands for manual management:
   on its next re-sync, for as long as the vCluster exists)
 
 `enroll` and `unenroll` write and delete the way the operator does: neither touches an ArgoCD secret that is not
-the enrollment of the vCluster named, `--force` or not.
+the enrollment of the vCluster named, `--force` or not. A running operator removes an enrollment made with `enroll`
+when it finds no StatefulSet or Deployment labelled `app=vcluster` for it (see `operator.sweepOrphans`).
 
 - **`verify <name> <namespace>`** -- Connect to the vCluster with the credentials enrolled in ArgoCD. Run it inside
   the cluster, where the vCluster's Service resolves

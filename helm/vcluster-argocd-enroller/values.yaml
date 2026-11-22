@@ -104,6 +104,11 @@ operator:
   allowedLabels: []
   allowedProjects: []
 
+  # Remove the enrollments of vClusters that are gone or no longer labelled app=vcluster: those deleted
+  # while the operator was down, for one. Checked at startup and every resyncInterval; an enrollment goes
+  # the second time in a row its vCluster is not found.
+  sweepOrphans: true
+
 # Additional environment variables for the operator
 env: []
   # - name: EXAMPLE_VAR

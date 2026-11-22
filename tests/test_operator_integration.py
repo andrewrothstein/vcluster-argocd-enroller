@@ -1018,6 +1018,180 @@ class TestAllowlists:
         assert _env_list("ALLOWED_LABELS") == expected
 
 
+class TestOrphanSweep:
+    """Test the removal of enrollments whose vCluster is gone."""
+
+    @staticmethod
+    def enrollments(mock_core, *vclusters):
+        """Enroll (namespace, name) vClusters in ArgoCD, and return their secrets by name."""
+        secrets = {}
+        for namespace, name in vclusters:
+            secret = enrolled_secret(name, namespace)
+            secret.metadata.name = f"vcluster-{namespace}-{name}"
+            secret.metadata.uid = f"uid-{namespace}-{name}"
+            secrets[secret.metadata.name] = secret
+
+        def read(name, namespace):
+            if name not in secrets:
+                raise ApiException(status=404)
+            return secrets[name]
+
+        mock_core.list_namespaced_secret.return_value = Mock(items=list(secrets.values()))
+        mock_core.read_namespaced_secret.side_effect = read
+        return secrets
+
+    @staticmethod
+    def workload(labels):
+        return Mock(metadata=client.V1ObjectMeta(labels=labels))
+
+    def test_enrollment_is_removed_the_second_time_its_vcluster_is_missing(self, k8s_mocked, caplog):
+        from vcluster_argocd_enroller.operator import sweep_orphans
+
+        mock_core, mock_apps = k8s_mocked
+        self.enrollments(mock_core, ("team-a", "gone"))
+
+        suspects = sweep_orphans(mock_core, mock_apps)
+
+        assert suspects == {"uid-team-a-gone"}
+        mock_core.delete_namespaced_secret.assert_not_called()
+        mock_core.list_namespaced_secret.assert_called_once_with(
+            namespace="argocd", label_selector="vcluster-operator=true"
+        )
+
+        with caplog.at_level("INFO"):
+            assert sweep_orphans(mock_core, mock_apps, suspects=suspects) == set()
+
+        mock_core.delete_namespaced_secret.assert_called_once_with(name="vcluster-team-a-gone", namespace="argocd")
+        assert "Removing the enrollment of team-a/gone" in caplog.text
+
+    @pytest.mark.parametrize("kind", ["stateful_set", "deployment"])
+    def test_enrollment_of_a_running_vcluster_is_kept(self, k8s_mocked, kind):
+        from vcluster_argocd_enroller.operator import sweep_orphans
+
+        mock_core, mock_apps = k8s_mocked
+        self.enrollments(mock_core, ("team-a", "alive"))
+        read = getattr(mock_apps, f"read_namespaced_{kind}")
+        read.side_effect = None
+        read.return_value = self.workload({"app": "vcluster"})
+
+        assert sweep_orphans(mock_core, mock_apps, suspects={"uid-team-a-alive"}) == set()
+
+        read.assert_called_once_with(name="alive", namespace="team-a")
+        mock_core.delete_namespaced_secret.assert_not_called()
+
+    def test_workload_that_lost_its_label_no_longer_counts(self, k8s_mocked):
+        from vcluster_argocd_enroller.operator import sweep_orphans
+
+        mock_core, mock_apps = k8s_mocked
+        self.enrollments(mock_core, ("team-a", "unlabelled"))
+        mock_apps.read_namespaced_stateful_set.side_effect = None
+        mock_apps.read_namespaced_stateful_set.return_value = self.workload({"release": "unlabelled"})
+
+        sweep_orphans(mock_core, mock_apps, suspects={"uid-team-a-unlabelled"})
+
+        mock_core.delete_namespaced_secret.assert_called_once()
+
+    def test_vcluster_that_cannot_be_looked_up_keeps_its_enrollment(self, k8s_mocked, caplog):
+        from vcluster_argocd_enroller.operator import sweep_orphans
+
+        mock_core, mock_apps = k8s_mocked
+        self.enrollments(mock_core, ("team-a", "unknown"), ("team-b", "gone"))
+        mock_apps.read_namespaced_deployment.side_effect = lambda name, namespace: (_ for _ in ()).throw(
+            ApiException(status=403 if namespace == "team-a" else 404, reason="Forbidden")
+        )
+
+        suspects = sweep_orphans(mock_core, mock_apps, suspects={"uid-team-a-unknown"})
+
+        # Not deleted, not even suspected: and the next enrollment is still looked at
+        assert suspects == {"uid-team-b-gone"}
+        mock_core.delete_namespaced_secret.assert_not_called()
+        assert "Keeping the enrollment of team-a/unknown: 403 Forbidden" in caplog.text
+
+    def test_only_watched_namespaces_are_swept(self, k8s_mocked):
+        from vcluster_argocd_enroller.operator import sweep_orphans
+
+        mock_core, mock_apps = k8s_mocked
+        self.enrollments(mock_core, ("team-a", "gone"), ("team-b", "gone"))
+
+        suspects = sweep_orphans(mock_core, mock_apps, namespaces=("team-a",), suspects={"uid-team-b-gone"})
+
+        assert suspects == {"uid-team-a-gone"}
+        mock_core.delete_namespaced_secret.assert_not_called()
+
+    def test_recreated_enrollment_is_given_time_again(self, k8s_mocked):
+        from vcluster_argocd_enroller.operator import sweep_orphans
+
+        mock_core, mock_apps = k8s_mocked
+        secrets = self.enrollments(mock_core, ("team-a", "restored"))
+        suspects = sweep_orphans(mock_core, mock_apps)
+        secrets["vcluster-team-a-restored"].metadata.uid = "another"
+
+        assert sweep_orphans(mock_core, mock_apps, suspects=suspects) == {"another"}
+        mock_core.delete_namespaced_secret.assert_not_called()
+
+    def test_secrets_that_are_not_labelled_enrollments_are_left_alone(self, k8s_mocked):
+        from vcluster_argocd_enroller.operator import sweep_orphans
+
+        mock_core, mock_apps = k8s_mocked
+        secrets = self.enrollments(mock_core, ("team-a", "legacy"), ("team-a", "renamed"))
+        legacy, renamed = secrets.values()
+        legacy.metadata.labels = {"argocd.argoproj.io/secret-type": "cluster", "vcluster-operator": "true"}
+        renamed.metadata.name = "a-copy"
+
+        assert sweep_orphans(mock_core, mock_apps, suspects={legacy.metadata.uid, renamed.metadata.uid}) == set()
+
+        mock_apps.read_namespaced_stateful_set.assert_not_called()
+        mock_core.delete_namespaced_secret.assert_not_called()
+
+    def test_sweep_goes_on_after_a_failure(self, k8s_mocked, monkeypatch, caplog):
+        """A sweep that cannot list the secrets is tried again, with the namespaces and suspects it had."""
+        import asyncio
+
+        from vcluster_argocd_enroller import operator
+
+        mock_core, mock_apps = k8s_mocked
+        calls = []
+
+        def sweep(core, apps, namespaces, suspects):
+            calls.append((namespaces, set(suspects)))
+            if len(calls) == 1:
+                return {"uid"}
+            if len(calls) == 2:
+                raise ApiException(status=500, reason="Internal Server Error")
+            raise asyncio.CancelledError
+
+        monkeypatch.setattr(operator, "sweep_orphans", sweep)
+        monkeypatch.setattr(operator, "RESYNC_INTERVAL", 0)
+        monkeypatch.setattr(operator, "WATCHED_NAMESPACES", ("team-a",))
+
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(operator._sweep_periodically())
+
+        assert calls == [(("team-a",), set()), (("team-a",), {"uid"}), (("team-a",), {"uid"})]
+        assert "500 Internal Server Error" in caplog.text
+
+    @pytest.mark.parametrize("enabled", [True, False])
+    def test_sweep_starts_with_the_operator_unless_turned_off(self, monkeypatch, enabled):
+        import asyncio
+
+        from vcluster_argocd_enroller import operator
+
+        async def run():
+            await operator.start_sweep()
+            task = operator._sweep_task
+            await operator.stop_sweep()
+            return task
+
+        async def forever():
+            await asyncio.sleep(3600)
+
+        monkeypatch.setattr(operator, "SWEEP_ORPHANS", enabled)
+        monkeypatch.setattr(operator, "_sweep_task", None)
+        monkeypatch.setattr(operator, "_sweep_periodically", forever)
+
+        assert (asyncio.run(run()) is not None) is enabled
+
+
 class TestConfiguration:
     """Test how the operator reads its settings and finds the cluster."""
 

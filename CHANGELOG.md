@@ -12,6 +12,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   keys and the projects a vCluster's workload may ask for with its annotations; `*` matches anything. Empty, the
   default, allows everything as before. What is not allowed is ignored with a warning, and the vCluster is
   enrolled without it
+- Enrollments whose vCluster is gone are removed: the operator looks for them at startup and every
+  `operator.resyncInterval`. That covers a vCluster deleted while the operator was down, one whose workload
+  lost its `app=vcluster` label, and one whose deletion the operator gave up on. An enrollment goes the second
+  time in a row its vCluster is not found, never when the lookup fails, and with `--namespace` only for
+  vClusters of that namespace. Enrollments made with `enroll` are included. `operator.sweepOrphans: false`
+  (`SWEEP_ORPHANS`) turns it off
 
 ### Changed
 - ArgoCD cluster secrets are written with server-side apply, as field manager `vcluster-argocd-enroller`. The

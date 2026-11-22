@@ -63,6 +63,8 @@ spec:
           value: {{ join "," .Values.operator.allowedLabels | quote }}
         - name: ALLOWED_PROJECTS
           value: {{ join "," .Values.operator.allowedProjects | quote }}
+        - name: SWEEP_ORPHANS
+          value: {{ .Values.operator.sweepOrphans | quote }}
         - name: HEALTH_PORT
           value: {{ .Values.networkPolicy.healthPort | quote }}
         {{- if .Values.leaderElection.enabled }}

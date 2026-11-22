@@ -98,7 +98,10 @@ def run(
         console.print("[yellow]Watching:[/yellow] all namespaces")
 
     # Import operator module to register handlers
-    from . import operator  # noqa: F401
+    from . import operator
+
+    # The sweep for enrollments without a vCluster keeps to the namespace watched
+    operator.WATCHED_NAMESPACES = (namespace,) if namespace else ()
 
     if dev:
         priority = MAX_PRIORITY
