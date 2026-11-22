@@ -63,6 +63,7 @@ The following table lists the configurable parameters and their default values:
 | `operator.resyncInterval` | Seconds between re-syncs of each vCluster (credential rotation, drift) | `300` |
 | `operator.allowedLabels` | Label keys vClusters may ask for with the `labels` annotation; `*` matches anything, empty allows all | `[]` |
 | `operator.allowedProjects` | Projects vClusters may ask for with the `project` annotation; `*` matches anything, empty allows all | `[]` |
+| `operator.sweepOrphans` | Remove enrollments whose vCluster is gone or no longer labelled `app=vcluster` | `true` |
 | `operator.logLevel` | Log level (DEBUG, INFO, WARNING, ERROR) | `INFO` |
 | `rbac.create` | Create RBAC resources | `true` |
 | `autoscaling.enabled` | Enable HPA (needs `leaderElection.enabled`; extra replicas are standbys) | `false` |

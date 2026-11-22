@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import json
 import logging
@@ -33,6 +34,11 @@ RESYNC_INTERVAL = float(_env("RESYNC_INTERVAL", "300"))
 # Empty allows them all. Whoever can edit a workload picks its annotations: these keep that to what is harmless.
 ALLOWED_LABELS = _env_list("ALLOWED_LABELS")
 ALLOWED_PROJECTS = _env_list("ALLOWED_PROJECTS")
+# Whether enrollments whose vCluster is gone are removed. The delete handler does that as a vCluster goes, but
+# not for one that went while the operator was down, lost its app=vcluster label, or outlasted DELETE_RETRIES.
+SWEEP_ORPHANS = _env("SWEEP_ORPHANS", "true").lower() != "false"
+# The namespaces whose vClusters this instance looks after, set by the CLI's --namespace. Empty for all of them.
+WATCHED_NAMESPACES: tuple[str, ...] = ()
 # Attempts at removing the ArgoCD secret before a deleted vCluster is let go anyway.
 DELETE_RETRIES = 10
 
@@ -77,6 +83,7 @@ logger = logging.getLogger(__name__)
 _k8s_configured = False
 _core_v1_api: client.CoreV1Api | None = None
 _apps_v1_api: client.AppsV1Api | None = None
+_sweep_task: asyncio.Task | None = None
 
 
 class NotOwnedError(Exception):
@@ -446,6 +453,77 @@ def _lives_on(apps_v1_api: client.AppsV1Api, deleted_plural: str, name: str, nam
     return VCLUSTER_LABELS.items() <= (meta.labels or {}).items()
 
 
+def _has_workload(apps_v1_api: client.AppsV1Api, namespace: str, name: str) -> bool:
+    """Tell whether a vCluster has a workload the operator watches: a StatefulSet or Deployment labelled as one.
+
+    One that is being deleted counts: its delete handler sees to the enrollment.
+    """
+    for read in (apps_v1_api.read_namespaced_stateful_set, apps_v1_api.read_namespaced_deployment):
+        try:
+            workload = read(name=name, namespace=namespace)
+        except ApiException as e:
+            if e.status == 404:
+                continue
+            raise
+        if VCLUSTER_LABELS.items() <= ((workload.metadata.labels if workload.metadata else None) or {}).items():
+            return True
+    return False
+
+
+def sweep_orphans(
+    core_v1_api: client.CoreV1Api,
+    apps_v1_api: client.AppsV1Api,
+    namespaces: Collection[str] = (),
+    suspects: Collection[str] = (),
+) -> set[str]:
+    """Remove the enrollments of vClusters that are gone, or no longer labelled as vClusters.
+
+    An enrollment is removed the second time in a row it is found without its vCluster: `suspects` are the
+    UIDs of the secrets found that way last time, and the return value those to pass in next time. That
+    keeps the enrollment of a vCluster whose workload is away for a moment, being replaced or restored after
+    its secret. With `namespaces`, only the enrollments of vClusters in those are looked at. A vCluster that
+    cannot be looked up keeps its enrollment.
+    """
+    secrets = core_v1_api.list_namespaced_secret(namespace=ARGOCD_NAMESPACE, label_selector=f"{OPERATOR_LABEL}=true")
+    orphans = set()
+    for secret in secrets.items:
+        meta = secret.metadata
+        labels = (meta.labels if meta else None) or {}
+        namespace, vcluster_name = labels.get(NAMESPACE_LABEL), labels.get(NAME_LABEL)
+        # A secret 1.x wrote, without these labels, goes when its vCluster is synced or deleted
+        if not meta or not meta.uid or not namespace or not vcluster_name:
+            continue
+        if (namespaces and namespace not in namespaces) or meta.name != ar_secret_name(namespace, vcluster_name):
+            continue
+        vcluster = f"{namespace}/{vcluster_name}"
+        try:
+            if _has_workload(apps_v1_api, namespace, vcluster_name):
+                continue
+            if meta.uid not in suspects:
+                logger.debug(f"ArgoCD cluster secret {meta.name} has no vCluster {vcluster}")
+                orphans.add(meta.uid)
+                continue
+            logger.info(f"Removing the enrollment of {vcluster}: there is no such vCluster any more")
+            remove_enrollment(core_v1_api, namespace, vcluster_name)
+        except ApiException as e:
+            logger.warning(f"Keeping the enrollment of {vcluster}: {e.status} {e.reason} checking on it")
+    return orphans
+
+
+async def _sweep_periodically() -> None:
+    """Run sweep_orphans() at startup and every RESYNC_INTERVAL from then on."""
+    suspects: set[str] = set()
+    while True:
+        try:
+            core_v1_api, apps_v1_api = _ensure_k8s()
+            suspects = await asyncio.to_thread(sweep_orphans, core_v1_api, apps_v1_api, WATCHED_NAMESPACES, suspects)
+        except ApiException as e:
+            logger.error(f"API error looking for enrollments without a vCluster: {e.status} {e.reason}")
+        except kopf.TemporaryError as e:
+            logger.error(f"Not looking for enrollments without a vCluster: {e}")
+        await asyncio.sleep(RESYNC_INTERVAL)
+
+
 def handle_vcluster_enrollment(
     workload_name: str, namespace: str, annotations: Mapping[str, str] | None = None, **kwargs
 ):
@@ -526,6 +604,21 @@ def configure(settings: kopf.OperatorSettings, **_):
     settings.persistence.diffbase_storage = kopf.AnnotationsDiffBaseStorage()
     settings.watching.connect_timeout = 1 * 60
     settings.watching.server_timeout = 10 * 60
+
+
+@kopf.on.startup()
+async def start_sweep(**_):
+    """Start looking for enrollments whose vCluster is gone."""
+    global _sweep_task
+    if SWEEP_ORPHANS:
+        _sweep_task = asyncio.create_task(_sweep_periodically())
+
+
+@kopf.on.cleanup()
+async def stop_sweep(**_):
+    """Stop the sweep as the operator exits."""
+    if _sweep_task is not None:
+        _sweep_task.cancel()
 
 
 @kopf.on.create("statefulsets.apps", labels=VCLUSTER_LABELS)

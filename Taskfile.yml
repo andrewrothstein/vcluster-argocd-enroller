@@ -113,7 +113,7 @@ tasks:
         --set 'operator.allowedLabels={env,tier}' --set 'operator.allowedProjects={team-*}'
 
   k3d-smoke:
-    desc: "Verify the operator is Ready under its NetworkPolicy with one active replica, then enroll fake vClusters and check the ArgoCD secrets through create, migration, re-sync, labels and project, an enrollment written by 2.2, opt-out, a change of workload kind and delete"
+    desc: "Verify the operator is Ready under its NetworkPolicy with one active replica, then enroll fake vClusters and check the ArgoCD secrets through create, migration, re-sync, labels and project, an enrollment written by 2.2, enrollments without a vCluster, opt-out, a change of workload kind and delete"
     cmds:
       - kubectl -n vcluster-system get networkpolicy test-release-vcluster-argocd-enroller
       - kubectl -n vcluster-system wait --for=condition=Ready pod -l app.kubernetes.io/name=vcluster-argocd-enroller --timeout=120s
@@ -162,6 +162,14 @@ tasks:
       - kubectl -n team-c annotate statefulset smoke --overwrite vcluster-argocd-enroller/labels=env=dev
       - kubectl -n argocd wait --for=jsonpath='{.metadata.labels.env}'=dev secret/vcluster-team-c-smoke --timeout=60s
       - kubectl -n argocd get secret vcluster-team-c-smoke -o jsonpath='{.metadata.labels.tier}' | grep -c . | grep -qx 0
+      # An enrollment without a vCluster is removed, the second time the operator finds it that way
+      - kubectl -n argocd create secret generic vcluster-team-z-ghost --from-literal=server=https{{":"}}//ghost.team-z
+      - kubectl -n argocd label secret vcluster-team-z-ghost vcluster-operator=true vcluster-argocd-enroller/namespace=team-z vcluster-argocd-enroller/name=ghost
+      - kubectl -n argocd wait --for=delete secret/vcluster-team-z-ghost --timeout=90s
+      - kubectl -n vcluster-system logs -l app.kubernetes.io/name=vcluster-argocd-enroller --tail=-1 | grep -qF 'ArgoCD cluster secret vcluster-team-z-ghost has no vCluster team-z/ghost'
+      # ...and so is the enrollment of a vCluster whose workload is no longer labelled as one
+      - kubectl -n team-c label statefulset smoke app-
+      - kubectl -n argocd wait --for=delete secret/vcluster-team-c-smoke --timeout=90s
       # A vCluster that opts out is unenrolled and stays out across re-syncs, until it opts back in
       - kubectl -n team-b annotate statefulset smoke vcluster-argocd-enroller/enroll=false
       - kubectl -n argocd wait --for=delete secret/vcluster-team-b-smoke --timeout=60s
