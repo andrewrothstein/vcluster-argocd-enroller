@@ -67,6 +67,10 @@ spec:
           value: {{ .Values.operator.sweepOrphans | quote }}
         - name: HEALTH_PORT
           value: {{ .Values.networkPolicy.healthPort | quote }}
+        {{- if .Values.metrics.enabled }}
+        - name: METRICS_PORT
+          value: {{ .Values.metrics.port | quote }}
+        {{- end }}
         {{- if .Values.leaderElection.enabled }}
         - name: PEERING_NAME
           value: {{ include "vcluster-argocd-enroller.fullname" . | quote }}
@@ -83,6 +87,11 @@ spec:
         - name: health
           containerPort: {{ .Values.networkPolicy.healthPort }}
           protocol: TCP
+        {{- if .Values.metrics.enabled }}
+        - name: metrics
+          containerPort: {{ .Values.metrics.port }}
+          protocol: TCP
+        {{- end }}
         {{- with .Values.volumeMounts }}
         volumeMounts:
         {{- toYaml . | nindent 8 }}

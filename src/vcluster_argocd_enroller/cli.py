@@ -48,6 +48,7 @@ def run(
     peering_name: Annotated[Optional[str], cyclopts.Parameter(env_var="PEERING_NAME")] = None,
     clusterwide: bool = True,
     health_port: Annotated[int, cyclopts.Parameter(env_var="HEALTH_PORT")] = 8080,
+    metrics_port: Annotated[Optional[int], cyclopts.Parameter(env_var="METRICS_PORT")] = None,
 ) -> None:
     """Run the vCluster ArgoCD enrollment operator.
 
@@ -70,6 +71,8 @@ def run(
         Watch cluster-wide (default: True); --no-clusterwide needs --namespace
     health_port : int
         Port serving /healthz for liveness and readiness probes; defaults to $HEALTH_PORT
+    metrics_port : int, optional
+        Port serving Prometheus metrics on /metrics; defaults to $METRICS_PORT, and without it there are none
     """
     import kopf
     import uvloop
@@ -107,6 +110,12 @@ def run(
         priority = MAX_PRIORITY
     elif priority is None:
         priority = random.randrange(MAX_PRIORITY)
+
+    if metrics_port:
+        from prometheus_client import start_http_server
+
+        start_http_server(metrics_port)
+        console.print(f"[yellow]Metrics:[/yellow] http://0.0.0.0:{metrics_port}/metrics")
 
     console.print("[green]Starting operator...[/green]")
     # Same loop setup as `kopf run`: kopf only picks uvloop by itself when launched from its own CLI.

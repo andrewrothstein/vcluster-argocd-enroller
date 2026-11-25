@@ -165,6 +165,10 @@ jobs:
           helm template test helm/vcluster-argocd-enroller --namespace vcluster-system \
             --set leaderElection.enabled=true --set replicaCount=2 | \
             kubeconform -strict -summary -output json -skip ClusterKopfPeering
+          # With a PodMonitor, which belongs to the Prometheus Operator and has no published schema here
+          helm template test helm/vcluster-argocd-enroller --namespace vcluster-system \
+            --set metrics.podMonitor.enabled=true | \
+            kubeconform -strict -summary -output json -skip PodMonitor
 
   security-scan:
     name: Security Scanning

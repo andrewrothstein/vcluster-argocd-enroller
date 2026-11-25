@@ -188,6 +188,9 @@ tasks:
       - kubectl -n argocd get secret vcluster-team-b-smoke
       - kubectl -n team-b delete deployment smoke --wait=false
       - kubectl -n argocd wait --for=delete secret/vcluster-team-b-smoke --timeout=60s
+      # Each replica serves metrics, and the active one has counted the enrollments it created and removed
+      - kubectl -n vcluster-system get pods -l app.kubernetes.io/name=vcluster-argocd-enroller -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' | xargs -I{} kubectl get --raw /api/v1/namespaces/vcluster-system/pods/{}{{":"}}9090/proxy/metrics | grep -c '^vcluster_argocd_enroller_info{' | grep -qx 2
+      - kubectl -n vcluster-system get pods -l app.kubernetes.io/name=vcluster-argocd-enroller -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' | xargs -I{} kubectl get --raw /api/v1/namespaces/vcluster-system/pods/{}{{":"}}9090/proxy/metrics | grep -E '^vcluster_argocd_enroller_(syncs_total\{outcome="created"\}|enrollments_removed_total\{reason="(deleted|orphaned|opted_out)"\}|last_sweep_timestamp_seconds) [1-9]' | cut -d' ' -f1 | sort -u | grep -c . | grep -qx 5
       # Leader election: the two replicas are peers, and only one of them handled the vCluster
       - kubectl get clusterkopfpeering test-release-vcluster-argocd-enroller -o jsonpath='{range .status.*}{.priority}{"\n"}{end}' | grep -c . | grep -qx 2
       - kubectl -n vcluster-system logs -l app.kubernetes.io/name=vcluster-argocd-enroller --tail=-1 --prefix | grep -F 'Detected new vcluster StatefulSet{{":"}} team-b/smoke' | cut -d' ' -f1 | sort -u | grep -c . | grep -qx 1

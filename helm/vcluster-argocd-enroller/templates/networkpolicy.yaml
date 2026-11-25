@@ -18,6 +18,12 @@ spec:
   - ports:
     - protocol: TCP
       port: {{ .Values.networkPolicy.healthPort }}
+  {{- if .Values.metrics.enabled }}
+  # Allow Prometheus to scrape the metrics port
+  - ports:
+    - protocol: TCP
+      port: {{ .Values.metrics.port }}
+  {{- end }}
   {{- with .Values.networkPolicy.ingress }}
     {{- toYaml . | nindent 2 }}
   {{- end }}
