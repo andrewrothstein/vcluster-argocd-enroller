@@ -64,6 +64,11 @@ Key Helm values:
 | `operator.allowedLabels` | Label keys vClusters may ask for with the `labels` annotation; `*` matches anything, empty allows all | `[]` |
 | `operator.allowedProjects` | Projects vClusters may ask for with the `project` annotation; `*` matches anything, empty allows all | `[]` |
 | `operator.sweepOrphans` | Remove enrollments whose vCluster is gone or no longer labelled `app=vcluster` | `true` |
+| `metrics.enabled` | Serve Prometheus metrics on `/metrics` | `true` |
+| `metrics.port` | Port the metrics are served on | `9090` |
+| `metrics.podMonitor.enabled` | Create a PodMonitor for the Prometheus Operator | `false` |
+| `metrics.podMonitor.interval` | Scrape interval; empty for Prometheus's default | `""` |
+| `metrics.podMonitor.labels` | Labels your Prometheus selects PodMonitors by | `{}` |
 | `operator.logLevel` | Log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) | `INFO` |
 | `replicaCount` | Operator replicas; more than one needs `leaderElection.enabled` | `1` |
 | `leaderElection.enabled` | Run one active replica and keep the others on standby | `false` |
@@ -139,6 +144,26 @@ values: allow only keys whose value a tenant may choose freely. They do not appl
   `"true"`. `check` marks such a vCluster `(opted out)`
 - Whoever can edit a vCluster's workload can set these. Treat the labels as the vCluster's own claim about itself
   when an ApplicationSet selects on them
+
+## Metrics
+
+The operator serves Prometheus metrics on `/metrics`, port `metrics.port` (9090). Set
+`metrics.podMonitor.enabled` for a PodMonitor if you run the Prometheus Operator, or scrape the pods' `metrics`
+port your own way.
+
+| Metric | Meaning |
+| --- | --- |
+| `vcluster_argocd_enroller_syncs_total{outcome}` | Syncs of a vCluster's enrollment: `created`, `updated`, `unchanged`, `opted_out` or `failed` |
+| `vcluster_argocd_enroller_enrollments_removed_total{reason}` | ArgoCD secrets deleted: the vCluster was `deleted`, `opted_out`, or `orphaned` (found gone by the sweep) |
+| `vcluster_argocd_enroller_enrollments` | ArgoCD secrets the operator looks after, as of the last sweep |
+| `vcluster_argocd_enroller_orphan_suspects` | Secrets whose vCluster the last sweep did not find; the next sweep removes them unless it is back |
+| `vcluster_argocd_enroller_last_sweep_timestamp_seconds` | When the sweep last completed |
+| `vcluster_argocd_enroller_info{version}` | The operator's version |
+
+Worth alerting on: `rate(vcluster_argocd_enroller_syncs_total{outcome="failed"}[15m]) > 0` for a vCluster that
+cannot be enrolled (the log says which and why), and a `last_sweep_timestamp_seconds` that stops advancing.
+The last three gauges come from the sweep, so they are absent with `operator.sweepOrphans: false`. With leader
+election every replica serves metrics, and only the active one counts syncs: sum over the pods.
 
 ## Managing a Fleet
 

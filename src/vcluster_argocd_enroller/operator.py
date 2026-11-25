@@ -11,6 +11,8 @@ import kopf
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
 
+from . import metrics
+
 
 def _env(name: str, default: str) -> str:
     """Read a setting from the environment. One that is set but empty counts as unset: the chart always sets these."""
@@ -486,6 +488,7 @@ def sweep_orphans(
     """
     secrets = core_v1_api.list_namespaced_secret(namespace=ARGOCD_NAMESPACE, label_selector=f"{OPERATOR_LABEL}=true")
     orphans = set()
+    enrollments = 0
     for secret in secrets.items:
         meta = secret.metadata
         labels = (meta.labels if meta else None) or {}
@@ -496,6 +499,7 @@ def sweep_orphans(
         if (namespaces and namespace not in namespaces) or meta.name != ar_secret_name(namespace, vcluster_name):
             continue
         vcluster = f"{namespace}/{vcluster_name}"
+        enrollments += 1
         try:
             if _has_workload(apps_v1_api, namespace, vcluster_name):
                 continue
@@ -504,9 +508,14 @@ def sweep_orphans(
                 orphans.add(meta.uid)
                 continue
             logger.info(f"Removing the enrollment of {vcluster}: there is no such vCluster any more")
-            remove_enrollment(core_v1_api, namespace, vcluster_name)
+            removed = remove_enrollment(core_v1_api, namespace, vcluster_name)
+            metrics.REMOVED.labels("orphaned").inc(len(removed))
+            enrollments -= 1
         except ApiException as e:
             logger.warning(f"Keeping the enrollment of {vcluster}: {e.status} {e.reason} checking on it")
+    metrics.ENROLLMENTS.set(enrollments)
+    metrics.ORPHAN_SUSPECTS.set(len(orphans))
+    metrics.LAST_SWEEP.set_to_current_time()
     return orphans
 
 
@@ -526,26 +535,36 @@ async def _sweep_periodically() -> None:
 
 def handle_vcluster_enrollment(
     workload_name: str, namespace: str, annotations: Mapping[str, str] | None = None, **kwargs
-):
+) -> None:
     """Create or update the ArgoCD cluster secret for a vCluster, or remove it when the vCluster opts out.
 
     `annotations` are those of the vCluster's workload, which say how it wants to be enrolled.
     """
+    try:
+        outcome = _enroll(workload_name, namespace, annotations or {})
+    except kopf.TemporaryError:
+        metrics.SYNCS.labels("failed").inc()
+        raise
+    metrics.SYNCS.labels(outcome).inc()
+
+
+def _enroll(workload_name: str, namespace: str, annotations: Mapping[str, str]) -> str:
+    """Do what handle_vcluster_enrollment() says, and return what that was, as the `outcome` of the syncs metric."""
     core_v1_api, _ = _ensure_k8s()
 
     vcluster_name = vc_name(workload_name)
-    annotations = annotations or {}
 
     if opted_out(annotations):
         logger.debug(f"Not enrolling {namespace}/{vcluster_name}: its workload is annotated {ENROLL_ANNOTATION}=false")
         try:
-            remove_enrollment(core_v1_api, namespace, vcluster_name)
+            removed = remove_enrollment(core_v1_api, namespace, vcluster_name)
         except ApiException as e:
             logger.error(f"API error removing the enrollment of {namespace}/{vcluster_name}: {e.status} {e.reason}")
             raise kopf.TemporaryError(
                 f"Failed to remove the enrollment of {namespace}/{vcluster_name}: {e.status} {e.reason}", delay=60
             )
-        return
+        metrics.REMOVED.labels("opted_out").inc(len(removed))
+        return "opted_out"
     if annotations.get(ENROLL_ANNOTATION, "true").strip().lower() != "true":
         logger.warning(
             f"Enrolling {namespace}/{vcluster_name}: its {ENROLL_ANNOTATION} annotation is neither true nor false"
@@ -583,7 +602,7 @@ def handle_vcluster_enrollment(
     argocd_secret_name = ar_secret_name(namespace, vcluster_name)
 
     try:
-        sync_enrollment(core_v1_api, namespace, vcluster_name, secret_body)
+        done = sync_enrollment(core_v1_api, namespace, vcluster_name, secret_body)
     except NotOwnedError as e:
         logger.error(str(e))
         raise kopf.TemporaryError(
@@ -592,6 +611,7 @@ def handle_vcluster_enrollment(
     except ApiException as e:
         logger.error(f"API error syncing ArgoCD secret {argocd_secret_name}: {e.status} {e.reason}")
         raise kopf.TemporaryError(f"Failed to sync ArgoCD secret {argocd_secret_name}: {e.status} {e.reason}", delay=60)
+    return done.lower() if done else "unchanged"
 
 
 @kopf.on.startup()
@@ -673,8 +693,9 @@ def vcluster_deleted(name, namespace, resource, **kwargs):
         if _lives_on(apps_v1_api, resource.plural, name, namespace):
             logger.info(f"Keeping the enrollment of {namespace}/{vcluster_name}: only its {kind} is replaced")
             return
-        remove_enrollment(core_v1_api, namespace, vcluster_name)
+        removed = remove_enrollment(core_v1_api, namespace, vcluster_name)
     except ApiException as e:
         logger.error(f"Failed to delete ArgoCD cluster secret for {namespace}/{vcluster_name}: {e.status} {e.reason}")
         # Never a PermanentError here. kopf retries DELETE_RETRIES times, then releases the finalizer anyway.
         raise kopf.TemporaryError(f"Failed to delete ArgoCD cluster secret: {e.status} {e.reason}", delay=30)
+    metrics.REMOVED.labels("deleted").inc(len(removed))

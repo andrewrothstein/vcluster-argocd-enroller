@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Prometheus metrics on `/metrics`, port `metrics.port` (9090; `--metrics-port` / `METRICS_PORT`, off without it
+  outside the chart): `vcluster_argocd_enroller_syncs_total` by outcome, `..._enrollments_removed_total` by
+  reason, and from the sweep `..._enrollments`, `..._orphan_suspects` and `..._last_sweep_timestamp_seconds`.
+  The chart exposes the port, lets it through the NetworkPolicy, and creates a PodMonitor with
+  `metrics.podMonitor.enabled`
+
+### Fixed
+- The changelog of 1.x no longer lists Prometheus metrics: there were none before this release
+
 ## [2.3.0] - 2026-11-22
 
 ### Added
@@ -125,7 +135,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Task automation with Taskfile
 - Support for high availability deployments
 - Network policies and security configurations
-- Prometheus metrics and monitoring support
 - Pod disruption budgets and horizontal pod autoscaling
 
 ### Security

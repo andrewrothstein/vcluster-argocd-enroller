@@ -117,6 +117,14 @@ class TestRun:
         assert kwargs["clusterwide"] is False
         assert kwargs["namespaces"] == ["team-a"]
 
+    def test_metrics_are_served_only_when_given_a_port(self, kopf_mocked):
+        with patch("prometheus_client.start_http_server") as start:
+            cli.run()
+            start.assert_not_called()
+
+            cli.run(metrics_port=9090)
+            start.assert_called_once_with(9090)
+
     @pytest.mark.parametrize("namespace,swept", [(None, ()), ("team-a", ("team-a",))])
     def test_orphan_sweep_keeps_to_the_namespace_watched(self, kopf_mocked, monkeypatch, namespace, swept):
         from vcluster_argocd_enroller import operator

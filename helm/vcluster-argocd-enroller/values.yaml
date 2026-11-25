@@ -138,6 +138,23 @@ rbac:
     #   verbs: ["get", "list"]
 
 # Network policy configuration
+# Prometheus metrics, served on /metrics: syncs by outcome, enrollments removed by reason, and what the
+# sweep for enrollments without a vCluster last found. With leader election every replica serves them,
+# and only the active one counts syncs.
+metrics:
+  enabled: true
+
+  # Port the metrics are served on; the network policy allows ingress to it
+  port: 9090
+
+  # A PodMonitor for the Prometheus Operator (needs its CRDs)
+  podMonitor:
+    enabled: false
+    # Scrape interval; empty for Prometheus's default
+    interval: ""
+    # Labels your Prometheus selects PodMonitors by
+    labels: {}
+
 networkPolicy:
   # Enable network policy
   enabled: true

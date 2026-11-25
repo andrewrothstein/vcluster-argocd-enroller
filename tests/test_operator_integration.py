@@ -1192,6 +1192,117 @@ class TestOrphanSweep:
         assert (asyncio.run(run()) is not None) is enabled
 
 
+def metric(name, **labels):
+    """Return the current value of one of the operator's metrics."""
+    from prometheus_client import REGISTRY
+
+    import vcluster_argocd_enroller.metrics  # noqa: F401
+
+    return REGISTRY.get_sample_value(f"vcluster_argocd_enroller_{name}", labels)
+
+
+class TestMetrics:
+    """Test what the operator counts."""
+
+    def test_version_and_every_outcome_are_there_from_the_start(self):
+        from vcluster_argocd_enroller import __version__
+
+        assert metric("info", version=__version__) == 1
+        for outcome in ("created", "updated", "unchanged", "opted_out", "failed"):
+            assert metric("syncs_total", outcome=outcome) is not None
+        for reason in ("deleted", "opted_out", "orphaned"):
+            assert metric("enrollments_removed_total", reason=reason) is not None
+
+    @pytest.mark.parametrize(
+        "existing,answer,outcome",
+        [(False, "2", "created"), (True, "2", "updated"), (True, "1", "unchanged")],
+        ids=["created", "updated", "unchanged"],
+    )
+    def test_syncs_are_counted_by_what_they_did(self, k8s_mocked, existing, answer, outcome):
+        from vcluster_argocd_enroller import operator
+
+        mock_core, _ = k8s_mocked
+        serve_secrets(
+            mock_core, {VC_SECRET: create_vcluster_secret(), **({ARGOCD_SECRET: enrolled_secret()} if existing else {})}
+        )
+        mock_core.patch_namespaced_secret.return_value = api_secret(resource_version=answer)
+        before = metric("syncs_total", outcome=outcome)
+
+        operator.vcluster_resync(**handler_args())
+
+        assert metric("syncs_total", outcome=outcome) == before + 1
+
+    def test_failed_sync_is_counted(self, k8s_mocked):
+        from vcluster_argocd_enroller import operator
+
+        mock_core, _ = k8s_mocked
+        mock_core.read_namespaced_secret.side_effect = ApiException(status=404)
+        before = metric("syncs_total", outcome="failed")
+
+        with pytest.raises(kopf.TemporaryError):
+            operator.vcluster_created(**handler_args())
+
+        assert metric("syncs_total", outcome="failed") == before + 1
+
+    def test_opting_out_counts_the_sync_and_the_secrets_removed(self, k8s_mocked):
+        from vcluster_argocd_enroller import operator
+
+        mock_core, _ = k8s_mocked
+        serve_secrets(
+            mock_core, {ARGOCD_SECRET: enrolled_secret(), ("argocd", "vcluster-test-cluster"): legacy_secret()}
+        )
+        syncs = metric("syncs_total", outcome="opted_out")
+        removed = metric("enrollments_removed_total", reason="opted_out")
+
+        operator.vcluster_updated(**handler_args(annotations={"vcluster-argocd-enroller/enroll": "false"}))
+
+        assert metric("syncs_total", outcome="opted_out") == syncs + 1
+        assert metric("enrollments_removed_total", reason="opted_out") == removed + 2
+
+    @pytest.mark.parametrize("enrolled,counted", [(True, 1), (False, 0)])
+    def test_deleted_vcluster_counts_the_secrets_removed(self, k8s_mocked, enrolled, counted):
+        from vcluster_argocd_enroller import operator
+
+        mock_core, _ = k8s_mocked
+        serve_secrets(mock_core, {ARGOCD_SECRET: enrolled_secret()} if enrolled else {})
+        before = metric("enrollments_removed_total", reason="deleted")
+
+        operator.vcluster_deleted(**handler_args())
+
+        assert metric("enrollments_removed_total", reason="deleted") == before + counted
+
+    def test_sweep_reports_what_it_found(self, k8s_mocked):
+        from vcluster_argocd_enroller.operator import sweep_orphans
+
+        mock_core, mock_apps = k8s_mocked
+        TestOrphanSweep.enrollments(mock_core, ("team-a", "alive"), ("team-a", "gone"), ("team-b", "new-gone"))
+        mock_apps.read_namespaced_stateful_set.side_effect = lambda name, namespace: (
+            workload() if name == "alive" else (_ for _ in ()).throw(ApiException(status=404))
+        )
+        before = metric("enrollments_removed_total", reason="orphaned")
+
+        sweep_orphans(mock_core, mock_apps, suspects={"uid-team-a-gone"})
+
+        assert metric("enrollments") == 2
+        assert metric("orphan_suspects") == 1
+        assert metric("enrollments_removed_total", reason="orphaned") == before + 1
+        assert metric("last_sweep_timestamp_seconds") == pytest.approx(datetime.now(UTC).timestamp(), abs=60)
+
+    def test_failed_sweep_leaves_the_time_of_the_last_one(self, k8s_mocked):
+        from vcluster_argocd_enroller.operator import sweep_orphans
+
+        mock_core, mock_apps = k8s_mocked
+        TestOrphanSweep.enrollments(mock_core)
+        sweep_orphans(mock_core, mock_apps)
+        last = metric("last_sweep_timestamp_seconds")
+        mock_core.list_namespaced_secret.side_effect = ApiException(status=500)
+
+        with pytest.raises(ApiException):
+            sweep_orphans(mock_core, mock_apps)
+
+        assert metric("last_sweep_timestamp_seconds") == last
+
+
 class TestConfiguration:
     """Test how the operator reads its settings and finds the cluster."""
 
